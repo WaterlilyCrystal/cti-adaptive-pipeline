@@ -18,16 +18,26 @@ org_profile:
 
 # ── Sources ──────────────────────────────────────────────
 sources:
-  rss:
-    - https://feeds.feedburner.com/TheHackersNews
-    - https://www.bleepingcomputer.com/feed/
-    - https://www.cisa.gov/uscert/ncas/alerts.xml
-    - https://www.darkreading.com/rss.xml
+  # RSS: Leave empty to use all 30+ multilingual sources from rss_collector.py SOURCES dict
+  # Includes: English (CISA, MS, Google, Krebs), Russian (Xakep, Securelist), 
+  # Chinese (FreeBuf, Seebug, Anquanke, Tencent), European (CERT-FR, CERT-Bund, etc.)
+  rss: []
   reddit:
-    subreddits: [netsec, threatintelligence, cybersecurity, malware]
+    # Multilingual subreddits (English, Chinese communities)
+    subreddits: [netsec, blueteamsec, threatintel, malware, ExploitDev, cybersecurity, chinatech]
     limit: 25
   telegram:
-    channels: [vxunderground, thecyberexpress]
+    # Multilingual channels (English, Russian, Chinese)
+    channels: [
+      vxunderground,        # English - largest malware/APT channel
+      CyberKnow,            # English - cyber knowledge
+      intel471,             # English - intelligence discussions
+      thecyberexpress,      # English - cyber news
+      breachesandleaks,     # English - data breach tracking
+      breakersgen,          # Russian - hacker discussions
+      feixuyun,             # Chinese - security research
+      malwaresec            # Multilingual - malware analysis
+    ]
   cve:
     nvd_days_back: 3      # Lấy CVE mới trong 3 ngày gần nhất
     cisa_kev: true        # Luôn bật — CVE đang bị exploit thực tế

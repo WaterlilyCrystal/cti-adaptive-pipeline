@@ -2,7 +2,15 @@ import requests
 import json
 import re
 import time
-from datetime import datetime, timedelta
+import logging
+import hashlib
+from datetime import datetime, timedelta, timezone
+from langdetect import detect, LangDetectException
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("mastodon_collector")
+
 
 def clean_html(raw_html: str) -> str:
     """
@@ -13,7 +21,7 @@ def clean_html(raw_html: str) -> str:
     clean_text = re.sub(clean_r, ' ', raw_html)
     return ' '.join(clean_text.split())
 
-def fetch_mastodon_fosstodon(limit: int = 1000, days_back: int = 3, hashtag: str = "threatintel") -> list:
+def fetch_mastodon_fosstodon(limit: int = 100, days_back: int = 3, hashtag: str = "cybersecurity") -> list[dict]:
     """
     Fetch the latest posts from the fosstodon.org community on Mastodon.
     Implements pagination to fetch up to a maximum limit within a specific time window.
@@ -24,105 +32,98 @@ def fetch_mastodon_fosstodon(limit: int = 1000, days_back: int = 3, hashtag: str
     print(f"[*] Target: Max {limit} posts from the last {days_back} days...")
     
     # Calculate the time threshold
-    threshold_date = datetime.utcnow() - timedelta(days=days_back)
-    
-    normalized_data = []
+    threshold_date = datetime.now(timezone.utc) - timedelta(days=days_back)
+
+    normalized_data: list[dict] = []
     max_id = None  # Used for pagination (fetching older posts)
 
     try:
         while len(normalized_data) < limit:
-            # Mastodon API allows a maximum of 40 items per request
             params = {"limit": 40}
             if max_id:
                 params["max_id"] = max_id
 
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            
-            posts = response.json()
-            
-            # Break the loop if there are no more posts returned
-            if not posts:
-                print("[*] Reached the end of the timeline.")
+            try:
+                response = requests.get(url, params=params, timeout=15)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request error when calling Mastodon: {type(e).__name__}: {e}")
                 break
-                
+
+            posts = response.json()
+            if not posts:
+                logger.debug("No posts returned from Mastodon timeline")
+                break
+
             for post in posts:
-                # Check the timestamp
-                # Mastodon returns ISO format with 'Z' (e.g., 2026-05-27T10:00:00.000Z)
                 post_time_str = post.get("created_at", "").replace('Z', '+00:00')
                 try:
-                    post_date = datetime.fromisoformat(post_time_str).replace(tzinfo=None)
+                    post_date = datetime.fromisoformat(post_time_str).replace(tzinfo=timezone.utc)
                 except ValueError:
-                    continue # Skip if date parsing fails
+                    logger.debug("Unable to parse Mastodon post timestamp, skipping")
+                    continue
 
-                # If the post is older than our threshold, stop collecting entirely
                 if post_date < threshold_date:
-                    print(f"[+] Reached the {days_back}-day time limit. Stopping pagination.")
+                    logger.info(f"Reached {days_back}-day threshold for Mastodon, stopping pagination")
                     return normalized_data
 
-                # Clean content
                 raw_content = post.get("content", "")
                 clean_content = clean_html(raw_content)
-                
-                # Skip empty posts (e.g., posts that only contain media)
                 if not clean_content.strip():
                     continue
-                    
-                # Extract Author
+
                 account = post.get("account", {})
                 username = account.get("username", "unknown_user")
-                
-                # 2. CHANGED: Normalize EXACTLY to the Database Schema with new source
+
+                # Language detection
+                lang = post.get("language") or "und"
+                try:
+                    if len(clean_content) > 10:
+                        detected = detect(clean_content[:300])
+                        lang = detected or lang
+                except LangDetectException:
+                    pass
+                except Exception:
+                    pass
+
+                post_url = post.get("url", "")
+                item_id = hashlib.md5(post_url.encode("utf-8")).hexdigest() if post_url else f"mastodon_{post.get('id')}"
+
                 item = {
-                    "id": f"mastodon_{post.get('id')}",
-                    "source": "Mastodon (fosstodon.org)",
-                    "source_type": "Social Media",
-                    "title": f"Alert from @{username}",
-                    "url": post.get("url"),
+                    "id": item_id,
+                    "source": f"Mastodon/@{username}",
+                    "source_type": "social",
+                    "title": clean_content.split("\n")[0][:200] if clean_content else f"Post by @{username}",
+                    "url": post_url,
                     "content": clean_content,
-                    "lang": post.get("language", "en"),
-                    "raw_iocs": "[]",     # To be extracted by AI in Phase 3
-                    "ttp_mapping": "[]",  # To be extracted by AI in Phase 3
-                    "confidence": 0.70,   # Social media gets a lower default confidence
-                    "relevance_score": 0.0,
+                    "lang": lang,
                     "processed": 0,
                     "report_done": 0,
-                    "collected_at": datetime.utcnow().isoformat()
+                    "collected_at": datetime.now(timezone.utc).isoformat(),
                 }
-                
+
                 normalized_data.append(item)
-                
-                # Stop if we hit the requested limit
                 if len(normalized_data) >= limit:
-                    print(f"[+] Reached the maximum limit of {limit} posts.")
+                    logger.info(f"Reached limit of {limit} posts from Mastodon")
                     break
-            
-            # Update max_id for the next pagination request (use the ID of the last post in the current batch)
+
             max_id = posts[-1].get("id")
-            
-            # Sleep briefly to respect API rate limits
             time.sleep(1)
-            
-        print(f"[+] Successfully fetched and normalized {len(normalized_data)} social media records.")
+
+        logger.info(f"Mastodon collection finished: {len(normalized_data)} items")
         return normalized_data
-        
-    except requests.exceptions.RequestException as e:
-        print(f"[-] Network connection error when calling Mastodon: {e}")
-        return normalized_data # Return whatever we managed to collect before the error
+
     except Exception as e:
-        print(f"[-] System error when processing Mastodon data: {e}")
+        logger.error(f"Error during Mastodon collection: {type(e).__name__}: {e}")
         return normalized_data
 
 # ==========================================
 # STANDALONE TEST BLOCK
 # ==========================================
 if __name__ == "__main__":
-    print("--- Running standalone test for the Mastodon module (Fosstodon) ---")
-    
-    # Test with a broader hashtag to ensure we get results quickly
-    test_data = fetch_mastodon_fosstodon(limit=1000, days_back=3, hashtag="cybersecurity")
-    
-    if test_data:
-        print(f"\n[+] Total records collected: {len(test_data)}")
-        print("\n--- Data Structure Preview (First Record) ---")
-        print(json.dumps(test_data[0], indent=4, ensure_ascii=False))
+    print("=== TEST RUN: MASTODON COLLECTOR ===")
+    data = fetch_mastodon_fosstodon(limit=50, days_back=3, hashtag="cybersecurity")
+    if data:
+        print(json.dumps(data[0], ensure_ascii=False, indent=2))
+    else:
+        print("No items collected. Check network connectivity and server URL")

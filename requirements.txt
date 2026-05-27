@@ -8,6 +8,8 @@ beautifulsoup4
 praw                      # Reddit
 tweepy                    # X/Twitter
 telethon                  # Telegram
+atproto                   # Bluesky AT Protocol SDK
+Mastodon.py               # Mastodon API client
 
 # === IOC & ATT&CK ===
 iocextract
@@ -19,6 +21,7 @@ spacy
 langdetect
 sentence-transformers
 faiss-cpu
+scikit-learn            # For cosine similarity in deduplication
 
 # === Storage ===
 chromadb

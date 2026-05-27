@@ -1,142 +1,139 @@
 import os
 import json
 import time
-from datetime import datetime, timedelta
+import logging
+import hashlib
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from atproto import Client, exceptions
+from langdetect import detect, LangDetectException
+
+
+
 
 # Load environment variables from the .env file
 load_dotenv()
 
-def fetch_bluesky_infosec(limit: int = 100, days_back: int = 3, keyword: str = "cybersecurity") -> list:
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("bluesky_collector")
+
+
+def fetch_bluesky_infosec(limit: int = 100, days_back: int = 3, keyword: str = "cybersecurity") -> list[dict]:
     """
     Fetch the latest posts from Bluesky based on a specific keyword.
-    Uses the AT Protocol SDK and Cursor Pagination.
+    Uses the AT Protocol SDK and Cursor Pagination. Normalizes items to the
+    `intel_items` schema used by the pipeline.
     """
-    print(f"[*] Starting Bluesky Collector (Keyword: '{keyword}')...")
-    
+    logger.info(f"Starting Bluesky collector (keyword='{keyword}', days_back={days_back})")
+
     handle = os.getenv("BLUESKY_HANDLE")
     app_password = os.getenv("BLUESKY_APP_PASSWORD")
-    
     if not handle or not app_password:
-        print("[-] ERROR: Missing BLUESKY_HANDLE or BLUESKY_APP_PASSWORD in the .env file")
+        logger.error("Missing BLUESKY_HANDLE or BLUESKY_APP_PASSWORD in .env file")
         return []
 
-    # 1. Initialize and Login Client
     client = Client()
     try:
         client.login(handle, app_password)
-        print("[+] Successfully logged into Bluesky API!")
+        logger.info("Authenticated with Bluesky API")
     except exceptions.UnauthorizedError:
-        print("[-] ERROR: Invalid Bluesky Handle or App Password.")
+        logger.error("Invalid Bluesky credentials")
         return []
     except Exception as e:
-        print(f"[-] Network connection error: {e}")
+        logger.error(f"Bluesky login error: {type(e).__name__}: {e}")
         return []
 
-    # 2. Set Time Threshold
-    threshold_date = datetime.utcnow() - timedelta(days=days_back)
-    normalized_data = []
-    cursor = None # 'Cursor' used to turn pages on Bluesky
+    threshold_date = datetime.now(timezone.utc) - timedelta(days=days_back)
+    normalized_data: list[dict] = []
+    cursor = None
 
     try:
-        # Pagination Loop
         while len(normalized_data) < limit:
-            # 3. Call Search API
-            # Max 100 posts per request. To search multiple keywords, use strings like 'ransomware OR malware'
             response = client.app.bsky.feed.search_posts({
-                'q': keyword,
-                'limit': min(100, limit - len(normalized_data)), # Only fetch the remaining required amount
-                'cursor': cursor
+                "q": keyword,
+                "limit": min(100, limit - len(normalized_data)),
+                "cursor": cursor,
             })
-            
-            posts = response.posts
+
+            posts = getattr(response, "posts", []) or []
             if not posts:
-                print("[*] Exhausted search results on Bluesky.")
+                logger.debug("No more posts returned from Bluesky search")
                 break
-                
+
             for post in posts:
-                # --- Process Timestamp ---
-                # Python SDK uses snake_case (created_at) or top-level indexed_at
-                time_raw = getattr(post.record, 'created_at', getattr(post, 'indexed_at', None))
-                
+                # Timestamp extraction
+                time_raw = getattr(post.record, "created_at", getattr(post, "indexed_at", None))
                 if not time_raw:
-                    continue # Bỏ qua nếu không tìm thấy thời gian
-                    
-                # Chuẩn hóa chuỗi thời gian (thay Z bằng +00:00 để datetime hiểu được)
-                post_time_str = time_raw.replace('Z', '+00:00')
-                
+                    continue
+                post_time_str = time_raw.replace("Z", "+00:00")
                 try:
-                    # Cắt bỏ phần thập phân của giây (nếu có) để tránh lỗi format
-                    if '.' in post_time_str:
-                        post_time_str = post_time_str.split('.')[0] + '+00:00'
-                        
-                    post_date = datetime.fromisoformat(post_time_str).replace(tzinfo=None)
-                except ValueError as e:
-                    print(f"[-] Lỗi parse thời gian: {time_raw} -> {e}")
+                    if "." in post_time_str:
+                        post_time_str = post_time_str.split(".")[0] + "+00:00"
+                    post_date = datetime.fromisoformat(post_time_str).replace(tzinfo=timezone.utc)
+                except Exception:
+                    logger.debug(f"Unable to parse timestamp: {time_raw}")
                     continue
 
-                # --- Process Content ---
-                raw_content = post.record.text
+                if post_date < threshold_date:
+                    continue
+
+                raw_content = getattr(post.record, "text", "") or ""
                 if not raw_content.strip():
                     continue
-                    
-                username = post.author.handle
-                
-                # --- Reconstruct Post URL ---
-                # Bluesky URLs are not directly in the API, we construct them from the Handle and Record Key (rkey)
-                rkey = post.uri.split('/')[-1]
+
+                username = getattr(post.author, "handle", "unknown")
+
+                # Build URL and deterministic id
+                rkey = str(getattr(post, "uri", "")).split("/")[-1]
                 post_url = f"https://bsky.app/profile/{username}/post/{rkey}"
-                
-                # --- Normalize EXACTLY to your Database Schema ---
+                item_id = hashlib.md5(post_url.encode("utf-8")).hexdigest()
+
+                # Language detection
+                lang = "und"
+                try:
+                    if len(raw_content) > 10:
+                        detected = detect(raw_content[:300])
+                        lang = detected or "und"
+                except LangDetectException:
+                    lang = "und"
+                except Exception:
+                    lang = "und"
+
                 item = {
-                    "id": f"bsky_{rkey}",
-                    "source": "Bluesky Social",
-                    "source_type": "Social Media",
-                    "title": f"Threat Intel by @{username}",
+                    "id": item_id,
+                    "source": f"Bluesky/@{username}",
+                    "source_type": "social",
+                    "title": (raw_content.split("\n")[0][:200]) if raw_content else f"Post by @{username}",
                     "url": post_url,
                     "content": raw_content,
-                    "lang": "en",
-                    "raw_iocs": "[]", # Will be extracted by LLM/AI later
-                    "ttp_mapping": "[]",
-                    "confidence": 0.75, # Default confidence score for Social Media
-                    "relevance_score": 0.0,
+                    "lang": lang,
                     "processed": 0,
                     "report_done": 0,
-                    "collected_at": datetime.utcnow().isoformat()
+                    "collected_at": datetime.now(timezone.utc).isoformat(),
                 }
-                
+
                 normalized_data.append(item)
-                
-                # Check the limit after each post
                 if len(normalized_data) >= limit:
                     break
-            
-            # 4. Get Cursor for the next page
-            cursor = getattr(response, 'cursor', None)
+
+            cursor = getattr(response, "cursor", None)
             if not cursor:
                 break
-                
-            # Sleep for 1 second to respect API Rate Limits
             time.sleep(1)
-            
-        print(f"[+] COMPLETED. Successfully collected {len(normalized_data)} CTI records from Bluesky.")
-        return normalized_data
-        
-    except Exception as e:
-        print(f"[-] System error during Bluesky pagination: {e}")
+
+        logger.info(f"Bluesky collection finished: {len(normalized_data)} items")
         return normalized_data
 
-# ==========================================
-# STANDALONE TEST BLOCK
-# ==========================================
+    except Exception as e:
+        logger.error(f"Error during Bluesky collection: {type(e).__name__}: {e}")
+        return normalized_data
+
+
 if __name__ == "__main__":
-    print("--- Running standalone test for the Bluesky module ---")
-    
-    # Test searching for ransomware over the last 3 days
-    test_data = fetch_bluesky_infosec(limit=50, days_back=3, keyword="ransomware")
-    
-    if test_data:
-        print(f"\n[+] Total records collected: {len(test_data)}")
-        print("\n--- Data Structure Preview (First Record) ---")
-        print(json.dumps(test_data[0], indent=4, ensure_ascii=False))
+    print("=== TEST RUN: BLUESKY COLLECTOR ===")
+    data = fetch_bluesky_infosec(limit=50, days_back=3, keyword="ransomware OR malware")
+    if data:
+        print(json.dumps(data[0], ensure_ascii=False, indent=2))
+    else:
+        print("No items collected. Check credentials in .env")
