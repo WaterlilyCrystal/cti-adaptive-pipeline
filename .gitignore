@@ -1,6 +1,27 @@
-data/ 
-__pycache__/ 
-.env 
-*.log 
-.DS_Store 
+# Secrets
+.env
+config_local.yaml
+
+# Data files 
+data/
+*.db
+*.sqlite
+
+# Model & cache
+enterprise-attack.json
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
 venv/
+*.egg-info/
+.DS_Store
+
+
+# data/ 
+# __pycache__/ 
+# .env 
+# *.log 
+# .DS_Store 
+# venv/

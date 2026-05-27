@@ -1,0 +1,49 @@
+# ── LLM ──────────────────────────────────────────────────
+llm:
+  runtime: ollama
+  model: qwen2.5:7b-instruct-q4_K_M
+  base_url: http://localhost:11434
+  num_ctx: 8192
+  temperature: 0.1
+
+# ── Org Profile ──────────────────────────────────────────
+org_profile:
+  name: "Demo Org"
+  industry: finance
+  os: ["Ubuntu 22.04", "Windows Server 2022"]
+  web: ["Nginx"]
+  db: ["PostgreSQL", "Redis"]
+  cloud: ["AWS"]
+  exposed_services: ["443", "22", "VPN"]
+
+# ── Sources ──────────────────────────────────────────────
+sources:
+  rss:
+    - https://feeds.feedburner.com/TheHackersNews
+    - https://www.bleepingcomputer.com/feed/
+    - https://www.cisa.gov/uscert/ncas/alerts.xml
+    - https://www.darkreading.com/rss.xml
+  reddit:
+    subreddits: [netsec, threatintelligence, cybersecurity, malware]
+    limit: 25
+  telegram:
+    channels: [vxunderground, thecyberexpress]
+  cve:
+    nvd_days_back: 3      # Lấy CVE mới trong 3 ngày gần nhất
+    cisa_kev: true        # Luôn bật — CVE đang bị exploit thực tế
+
+# ── Pipeline ─────────────────────────────────────────────
+pipeline:
+  dedup_threshold: 0.90   # Cosine similarity — trên ngưỡng này = duplicate
+  min_confidence: 0.50    # Bỏ qua item dưới ngưỡng này
+  max_content_chars: 5000 # Cắt content trước khi đưa vào LLM
+  ram_threshold_pct: 85   # Auto-pause khi RAM vượt ngưỡng này
+
+# ── API Keys (để trống ở đây, điền vào .env) ────────────
+api_keys:
+  reddit_client_id: ""
+  reddit_client_secret: ""
+  twitter_bearer_token: ""
+  telegram_api_id: ""
+  telegram_api_hash: ""
+  otx_api_key: ""

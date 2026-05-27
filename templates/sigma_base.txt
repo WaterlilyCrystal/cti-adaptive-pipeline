@@ -1,0 +1,19 @@
+title: {title}
+id: {rule_id}
+status: experimental
+description: {description}
+references:
+  - {source_url}
+logsource:
+  product: {product}
+  service: {service}
+detection:
+  selection:
+    {detection_field}: {detection_value}
+  condition: selection
+falsepositives:
+  - {falsepositive}
+level: {level}
+tags:
+  - attack.{tactic}
+  - attack.{technique_id_lower}

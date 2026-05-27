@@ -1,0 +1,34 @@
+# === LLM Runtime ===
+ollama                    # Python client gọi Ollama local
+
+# === Data Collection ===
+requests
+feedparser
+beautifulsoup4
+praw                      # Reddit
+tweepy                    # X/Twitter
+telethon                  # Telegram
+
+# === IOC & ATT&CK ===
+iocextract
+mitreattack-python
+stix2
+
+# === NLP / Dedup ===
+spacy
+langdetect
+sentence-transformers
+faiss-cpu
+
+# === Storage ===
+chromadb
+
+# === Dashboard ===
+streamlit
+pandas
+pyyaml
+
+# === Utils ===
+psutil
+python-dotenv
+schedule
