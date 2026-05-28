@@ -3,7 +3,7 @@ import json
 import time
 
 from utils import db_handler
-from analysis import llm_caller, ttp_mapper, sigma_engine, ioc_extractor
+from analysis import llm_caller, ttp_mapper, sigma_engine, ioc_extractor, osint_enricher
 from reporting import reporter
 
 def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
@@ -24,9 +24,21 @@ def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
     iocs = ioc_extractor.extract_all_iocs(content)
     print(f"   -> Found: {len(iocs.get('ips', []))} IPs, {len(iocs.get('urls', []))} URLs, {len(iocs.get('cves', []))} CVEs.")
 
+    # STEP 1.5: OSINT ENRICHMENT (SPIDERFOOT LOGIC)
+    print("\n[Step 1.5] Triggering OSINT Enrichment (SpiderFoot-style)...")
+    osint_data = osint_enricher.run_spiderfoot_enrichment(iocs)
+    
+    # Gộp dữ liệu OSINT vào nội dung bài báo để LLM có thêm thông tin thực tế
+    enriched_content = content
+    if osint_data:
+        enriched_content += f"\n\n--- OSINT ENRICHMENT DATA ---\n{json.dumps(osint_data, indent=2)}"
+        print("   -> Successfully enriched intelligence with OSINT data.")
+    else:
+        print("   -> No actionable OSINT data found. Proceeding with raw content.")
+
     # STEP 2: SEMANTIC ANALYSIS VIA LLM (JSON)
     print("\n[Step 2] Activating Ollama for CTI semantic analysis...")
-    cti_data = llm_caller.extract_cti_data(content)
+    cti_data = llm_caller.extract_cti_data(enriched_content)
     
     # STEP 3: MITRE ATT&CK VALIDATION AND ENRICHMENT
     print("\n[Step 3] Validating MITRE codes to prevent AI hallucination...")
@@ -39,16 +51,16 @@ def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
         tech_id = ttp['technique_id']
         tech_name = ttp.get('technique_name_official', 'Unknown')
         
-        # Force AI to cite evidence from the article
-        reasoning = llm_caller.generate_reasoning(content, tech_id, tech_name)
+        # Force AI to cite evidence from the ENRICHED article
+        reasoning = llm_caller.generate_reasoning(enriched_content, tech_id, tech_name)
         ttp['reasoning'] = reasoning
         print(f"   -> Evidence for {tech_id}: {reasoning[:100]}...")
         
-        # Generate Sigma rule if a matching template exists
+        # Generate Sigma rule if a matching template exists (Fixed 'domains' to 'urls')
         sigma_vars = {
             "threat_name": cti_data.get('threat_actors', ['Unknown Threat'])[0] if cti_data.get('threat_actors') else "Unknown Threat",
             "cve_id": iocs.get('cves', ['Unknown-CVE'])[0] if iocs.get('cves') else "Unknown-CVE",
-            "ioc_indicator": iocs.get('ips', [''])[0] if iocs.get('ips') else (iocs.get('domains', [''])[0] if iocs.get('domains') else "suspicious_activity"),
+            "ioc_indicator": iocs.get('ips', [''])[0] if iocs.get('ips') else (iocs.get('urls', [''])[0] if iocs.get('urls') else "suspicious_activity"),
             "source_url": item.get('source', 'Internal_CTI_System'),
             "severity": cti_data.get('severity', 'high')
         }
@@ -58,7 +70,7 @@ def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
             safe_filename = f"detect_{tech_id}_{item_id[-6:]}.yml".lower()
             sigma_engine.validate_and_save_yaml(sigma_yaml, safe_filename)
             
-            # --- TÍCH HỢP NATIVE DB: Lưu luật Sigma vào database ---
+            # Lưu luật Sigma vào database
             if not is_mock and db_conn:
                 db_handler.save_sigma_rule(db_conn, item_id, tech_id, sigma_yaml)
 
@@ -69,13 +81,11 @@ def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
     print("\n[Step 5] Generating 3-tier reports (Executive, Technical, Operational)...")
     reporter.generate_multi_tier_reports(cti_data, iocs, title)
 
-    # STEP 6: SAVE TO DATABASE (ONLY RUNS WHEN NOT IN MOCK MODE)
+    # STEP 6: SAVE TO DATABASE
     if not is_mock and db_conn:
         print("\n[Step 6] Updating analysis results back to Database...")
-        # Chuyển đổi severity thành điểm relevance giả định (cao = 0.9, thấp = 0.5)
         relevance_score = 0.9 if cti_data.get('severity', '').lower() in ['high', 'critical'] else 0.5
         
-        # Gọi chính xác hàm update_analysis từ db_handler của nhóm
         success = db_handler.update_analysis(
             conn=db_conn,
             item_id=item_id,
@@ -113,11 +123,9 @@ def main():
     else:
         print("[*] INITIALIZING PRODUCTION PIPELINE")
         
-        # --- TÍCH HỢP NATIVE DB: Khởi tạo kết nối và gọi hàm get_pending ---
         conn = db_handler.init_db()
         all_pending_items = db_handler.get_pending(conn)
         
-        # Chỉ lấy tối đa 5 bản tin để tránh quá tải LLM trong 1 lần chạy
         items = all_pending_items[:5] 
         
         if not items:
