@@ -8,6 +8,7 @@ from datetime import datetime
 # ==============================================================================
 # We define hardcoded templates to prevent LLM indentation errors.
 SIGMA_TEMPLATES = {
+    # Rule cho File đính kèm qua mail (T1566.001)
     "T1566.001": """title: Detect Spearphishing Attachment - {threat_name}
 id: {rule_id}
 status: experimental
@@ -32,6 +33,29 @@ detection:
     condition: selection
 falsepositives:
     - Legitimate user downloading unusual file types.
+level: {severity}
+""",
+
+    # Rule TỔNG QUÁT cho Phishing Domain/URL (T1566) - Rất hợp với các bài báo Weebly
+    "T1566": """title: Detect Phishing Domain Access - {threat_name}
+id: {rule_id}
+status: experimental
+description: Detects network connections or web proxy requests to known phishing domains linked to {threat_name}.
+references:
+    - {source_url}
+author: Adaptive CTI Pipeline
+date: {current_date}
+tags:
+    - attack.initial_access
+    - attack.t1566
+logsource:
+    category: proxy
+detection:
+    selection:
+        c-uri|contains: '{ioc_indicator}'
+    condition: selection
+falsepositives:
+    - Misclassified threat intelligence.
 level: {severity}
 """,
 
@@ -90,7 +114,16 @@ def generate_sigma_rule(technique_id: str, variables: dict) -> str:
     Fills the predefined Sigma YAML template with threat data.
     Returns the raw YAML string if the template exists, else None.
     """
+    # 1. Tìm chính xác mã (VD: T1566.001)
     template = SIGMA_TEMPLATES.get(technique_id)
+    
+    # 2. CƠ CHẾ FALLBACK: Nếu không có mã con, tìm mã cha (VD: Từ T1566.002 lùi về T1566)
+    if not template and "." in technique_id:
+        parent_id = technique_id.split(".")[0]
+        template = SIGMA_TEMPLATES.get(parent_id)
+        if template:
+            print(f"[*] Fallback: Dùng template của mã cha {parent_id} cho {technique_id}")
+
     if not template:
         print(f"[*] No predefined template for technique {technique_id}. Skipping Sigma generation.")
         return None
@@ -123,6 +156,11 @@ def validate_and_save_yaml(yaml_content: str, filename: str) -> bool:
     output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output", "sigma_rules")
     os.makedirs(output_dir, exist_ok=True)
     
+    # Giới hạn độ dài tên file (tránh lỗi OS giống như bên report)
+    if len(filename) > 100:
+        name, ext = os.path.splitext(filename)
+        filename = f"{name[:90]}_trim{ext}"
+    
     file_path = os.path.join(output_dir, filename)
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -141,13 +179,13 @@ if __name__ == "__main__":
     mock_threat_data = {
         "threat_name": "Zero-Day Nginx RCE",
         "cve_id": "CVE-2026-9999",
-        "ioc_indicator": "/tmp/.nginx_update", # Simulated malicious payload path
+        "ioc_indicator": "malicious-phishing-site.com", # Thử nghiệm với Domain
         "source_url": "https://twitter.com/security_researcher/status/123",
         "severity": "critical"
     }
     
-    # We pretend the AI mapped this to T1190 (Exploit Public-Facing Application)
-    target_technique = "T1190"
+    # Thử nghiệm với mã T1566.002 (Spearphishing Link) - sẽ tự fallback về T1566
+    target_technique = "T1566.002"
     
     print(f"[*] Attempting to generate rule for {target_technique}...")
     

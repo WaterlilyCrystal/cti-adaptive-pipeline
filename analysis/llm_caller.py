@@ -16,6 +16,11 @@ Start your response with '{' and end with '}'."""
 
 ANALYSIS_PROMPT = """Analyze the following threat intelligence content.
 
+CRITICAL RULES FOR MITRE ATT&CK MAPPING:
+1. You MUST ONLY extract real, officially documented MITRE ATT&CK technique IDs (e.g., T1566 for Phishing, T1190 for Exploit Public-Facing Application).
+2. NEVER invent, guess, or use placeholder codes like 'T1234' or 'T0000'.
+3. If you cannot confidently map a real technique, leave the "suggested_techniques" array EMPTY []. Do not hallucinate.
+
 CONTENT:
 {content}
 
@@ -28,7 +33,7 @@ Respond with this EXACT JSON structure. If a field is not found, use an empty li
   "attack_vector": "brief description",
   "suggested_techniques": [
     {{
-      "technique_id": "T1234",
+      "technique_id": "T1566",
       "confidence": "high/medium/low"
     }}
   ],

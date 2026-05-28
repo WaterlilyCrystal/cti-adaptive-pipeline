@@ -2,9 +2,14 @@ import streamlit as st
 import os
 import glob
 import pandas as pd
+import sqlite3
+import json
+from streamlit_autorefresh import st_autorefresh
+
+st_autorefresh(interval=60000, limit=None, key="soc_dashboard_refresh")
 
 # ==============================================================================
-# PAGE CONFIGURATION (Must be the first command)
+# PAGE CONFIGURATION
 # ==============================================================================
 st.set_page_config(
     page_title="Adaptive CTI Dashboard",
@@ -19,9 +24,10 @@ st.set_page_config(
 BASE_DIR = os.path.dirname(__file__)
 REPORTS_DIR = os.path.join(BASE_DIR, "output", "reports")
 SIGMA_DIR = os.path.join(BASE_DIR, "output", "sigma_rules")
+DB_PATH = os.path.join(BASE_DIR, "data", "cti.db")
 
 # ==============================================================================
-# FILE READING UTILITIES
+# UTILITIES & DATABASE FUNCTIONS
 # ==============================================================================
 def read_file_content(filepath):
     try:
@@ -33,8 +39,56 @@ def read_file_content(filepath):
 def get_files_in_dir(directory, extension="*"):
     if not os.path.exists(directory):
         return []
-    # Find all files with the specified extension
     return sorted(glob.glob(os.path.join(directory, f"*.{extension}")))
+
+def fetch_live_metrics():
+    """Truy vấn Database thật để lấy số liệu thống kê cho Dashboard"""
+    if not os.path.exists(DB_PATH):
+        return 0, 0, pd.DataFrame()
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    try:
+        # 1. Đếm tổng số bài đã phân tích
+        cursor.execute("SELECT count(*) FROM intel_items WHERE processed=1")
+        total_processed = cursor.fetchone()[0]
+        
+        # 2. Đếm tổng số rule Sigma
+        cursor.execute("SELECT count(*) FROM sigma_rules")
+        total_sigma = cursor.fetchone()[0]
+        
+        # 3. Gom nhóm và đếm các mã MITRE ATT&CK đã phát hiện
+        cursor.execute("SELECT ttp_mapping FROM intel_items WHERE processed=1 AND ttp_mapping != '[]'")
+        rows = cursor.fetchall()
+        
+        technique_counts = {}
+        for row in rows:
+            try:
+                ttps = json.loads(row[0])
+                for ttp in ttps:
+                    tech_id = ttp.get("technique_id", "Unknown")
+                    tech_name = ttp.get("technique_name_official", "Unknown")
+                    label = f"{tech_id} - {tech_name}"
+                    technique_counts[label] = technique_counts.get(label, 0) + 1
+            except:
+                pass
+                
+        if technique_counts:
+            df_matrix = pd.DataFrame({
+                "MITRE Technique": list(technique_counts.keys()),
+                "Detection Count": list(technique_counts.values())
+            }).sort_values(by="Detection Count", ascending=False)
+        else:
+            df_matrix = pd.DataFrame({"MITRE Technique": ["No Threat Detected"], "Detection Count": [0]})
+            
+    except Exception as e:
+        st.error(f"Database Error: {e}")
+        total_processed, total_sigma, df_matrix = 0, 0, pd.DataFrame()
+    finally:
+        conn.close()
+        
+    return total_processed, total_sigma, df_matrix
 
 # ==============================================================================
 # MAIN INTERFACE
@@ -42,7 +96,6 @@ def get_files_in_dir(directory, extension="*"):
 st.title("🛡️ Adaptive Cyber Threat Intelligence (CTI)")
 st.markdown("*Automated semantic analysis, MITRE ATT&CK validation, and defense rule generation system.*")
 
-# Create 3 main Tabs for the Dashboard
 tab_overview, tab_reports, tab_sigma = st.tabs([
     "📊 System Overview", 
     "📄 3-Tier Reports", 
@@ -50,31 +103,31 @@ tab_overview, tab_reports, tab_sigma = st.tabs([
 ])
 
 # ------------------------------------------------------------------------------
-# TAB 1: OVERVIEW (METRICS & MOCK CHARTS)
+# TAB 1: OVERVIEW (LIVE DATABASE METRICS)
 # ------------------------------------------------------------------------------
 with tab_overview:
-    st.header("Pipeline Status (Mock Data)")
+    st.header("Pipeline Status (Live Production Data)")
     
-    # Display KPIs in columns
+    # Fetch real data from SQLite
+    total_processed, total_sigma, df_matrix = fetch_live_metrics()
+    
+    # Display Live KPIs
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label="Processed Feeds", value="1", delta="New")
-    col2.metric(label="Extracted IOCs", value="1 CVE", delta="Clean")
-    col3.metric(label="Mapped MITRE Codes", value="T1505.003", delta="Validated")
-    col4.metric(label="Generated Sigma Rules", value="1", delta="Ready")
+    col1.metric(label="Processed Threat Feeds", value=total_processed, delta="Synced to DB")
+    col2.metric(label="System Status", value="Active", delta="No Bottlenecks")
+    col3.metric(label="Unique MITRE Tactics", value=len(df_matrix) if total_processed > 0 else 0)
+    col4.metric(label="Generated Sigma Rules", value=total_sigma, delta="Ready for SIEM")
 
     st.divider()
     
-    # Mock Tactics Matrix
-    st.subheader("Tactics Matrix")
-    mock_matrix_data = pd.DataFrame({
-        "Tactic": ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Defense Evasion"],
-        "Technique Count": [4, 2, 1, 0, 3],
-        "Severity": ["High", "Medium", "Critical", "Low", "High"]
-    })
-    st.dataframe(mock_matrix_data, use_container_width=True, hide_index=True)
+    st.subheader("Live MITRE ATT&CK Detection Matrix")
+    if total_processed > 0:
+        st.dataframe(df_matrix, width="stretch", hide_index=True)
+    else:
+        st.info("No threats analyzed yet. Run the pipeline to populate this matrix.")
 
 # ------------------------------------------------------------------------------
-# TAB 2: MULTI-TIER REPORTS (READING MARKDOWN FILES)
+# TAB 2: MULTI-TIER REPORTS
 # ------------------------------------------------------------------------------
 with tab_reports:
     st.header("Multi-Audience Reporting System")
@@ -83,13 +136,11 @@ with tab_reports:
     report_files = get_files_in_dir(REPORTS_DIR, "md")
     
     if not report_files:
-        st.warning(f"No reports found in {REPORTS_DIR}. Please run run_analysis.py first.")
+        st.warning(f"No reports found in {REPORTS_DIR}. Please run the pipeline first.")
     else:
-        # Group reports by their base name (removing _01_executive, _02_technical suffixes)
         report_groups = {}
         for fpath in report_files:
             fname = os.path.basename(fpath)
-            # Extract base name (e.g., nginx_zero_day_rce...)
             base_group = fname.replace("_01_executive.md", "").replace("_02_technical.md", "").replace("_03_operational.md", "")
             if base_group not in report_groups:
                 report_groups[base_group] = {}
@@ -101,13 +152,10 @@ with tab_reports:
             elif "operational" in fname:
                 report_groups[base_group]["Sysadmin (Operational)"] = fpath
 
-        # Dropdown to select a threat event
-        selected_group = st.selectbox("Select Threat Event:", list(report_groups.keys()))
+        selected_group = st.selectbox("Select Threat Event to view reports:", list(report_groups.keys()))
         
         if selected_group:
             files_to_show = report_groups[selected_group]
-            
-            # Split into 3 columns to display reports side-by-side
             r_col1, r_col2, r_col3 = st.columns(3)
             
             with r_col1:
@@ -116,42 +164,38 @@ with tab_reports:
                     st.markdown(read_file_content(files_to_show["CISO (Executive)"]))
                     
             with r_col2:
-                st.subheader("🕵️ For SOC Analyst (Technical)")
+                st.subheader("🕵️ For SOC Analyst")
                 if "SOC (Technical)" in files_to_show:
                     st.markdown(read_file_content(files_to_show["SOC (Technical)"]))
                     
             with r_col3:
-                st.subheader("🛠️ For Network Engineer (Operational)")
+                st.subheader("🛠️ For Network Engineer")
                 if "Sysadmin (Operational)" in files_to_show:
                     st.markdown(read_file_content(files_to_show["Sysadmin (Operational)"]))
 
 # ------------------------------------------------------------------------------
-# TAB 3: SIGMA DEFENSE RULES (READING YAML FILES)
+# TAB 3: SIGMA DEFENSE RULES
 # ------------------------------------------------------------------------------
 with tab_sigma:
     st.header("Auto-Generated Defense Rules (Sigma Engine)")
-    st.info("These rules are auto-populated with IOCs and TTPs by AI, ready for export to SIEMs (Splunk, Elastic) or Firewalls.")
+    st.info("These rules are auto-populated with IOCs and TTPs by AI, ready for export to SIEMs (Splunk, Elastic).")
     
     sigma_files = get_files_in_dir(SIGMA_DIR, "yml")
     
     if not sigma_files:
-        st.warning(f"No Sigma rules found in {SIGMA_DIR}. Please run run_analysis.py first.")
+        st.warning(f"No Sigma rules found in {SIGMA_DIR}. Please run the pipeline first.")
     else:
-        # Get list of filenames
         sigma_filenames = [os.path.basename(f) for f in sigma_files]
-        selected_sigma = st.selectbox("Select a Sigma Rule to view details:", sigma_filenames)
+        selected_sigma = st.selectbox("Select a Sigma Rule to view/download:", sigma_filenames)
         
         if selected_sigma:
-            # Full file path
             full_path = os.path.join(SIGMA_DIR, selected_sigma)
             yaml_content = read_file_content(full_path)
             
-            # Display code with YAML syntax highlighting
             st.code(yaml_content, language="yaml")
             
-            # Download button
             st.download_button(
-                label="📥 Download .yml file",
+                label="📥 Download .yml rule",
                 data=yaml_content,
                 file_name=selected_sigma,
                 mime="text/yaml"

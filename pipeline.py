@@ -7,6 +7,8 @@ import logging
 import json
 from datetime import datetime, timezone
 from utils.db_handler import init_db, save_items_batch
+from utils import db_handler
+import run_analysis
 
 from core.reddit_collector import fetch_reddit_rss_feed
 from core.rss_collector import fetch_rss_from_config
@@ -170,31 +172,43 @@ def phase_process(cfg: dict):
 
 def phase_analyze(cfg: dict):
     """
-    Phase 3: Threat Analysis & Intelligence Enrichment
-    Extracts IOCs (Indicators of Compromise), maps MITRE ATT&CK TTPs, 
-    generates Sigma rules, and creates threat intelligence reports.
-    
-    TODO (Student B): Implement the following:
-      1. IOC Extraction (IPs, domains, file hashes, URLs) using iocextract
-      2. MITRE ATT&CK Framework TTP mapping using sentence-transformers + LLM
-      3. Sigma Rule generation from threat patterns
-      4. Confidence scoring and relevance ranking
-      5. Report generation (technical & executive summaries)
+    Phase 3 & 4: Threat Analysis & Intelligence Enrichment
+    [INTEGRATED] System automatically extracts IOCs, maps MITRE TTPs, 
+    generates Sigma rules, and exports 3-tier reports using LLM (Qwen2.5).
     """
     timestamp = datetime.now(timezone.utc).isoformat()
-    logging.info(f"[{timestamp}] === PHASE 3: ANALYSIS ===")
-    logging.warning("Phase 3 (Analysis) is not yet implemented - Student B needs to implement this phase")
-    logging.info("Expected Phase 3 tasks:")
-    logging.info("  1. Extract IOCs using iocextract library")
-    logging.info("  2. Map to MITRE ATT&CK TTPs using LLM enrichment")
-    logging.info("  3. Generate Sigma detection rules")
-    logging.info("  4. Calculate threat confidence scores")
-    logging.info("  5. Create technical & executive reports")
+    logging.info(f"[{timestamp}] === PHASE 3 & 4: ANALYSIS AND REPORTING ===")
     
-    raise NotImplementedError(
-        "Phase 3 (Analysis) not yet implemented. "
-        "Student B needs to implement phase_analyze() with IOC extraction, TTP mapping, and Sigma rule generation."
-    )
+    db_conn = db_handler.init_db()
+    
+    try:
+        # Fetch articles cleaned by Phase 2 that haven't been analyzed yet
+        all_pending_items = db_handler.get_pending(db_conn)
+        
+        # Limit to 5 feeds per run to prevent RAM/GPU overload on Local LLM
+        items_to_process = all_pending_items[:5]
+        
+        if not items_to_process:
+            logging.info("[-] No new feeds require AI analysis. System going to sleep.")
+            return
+            
+        logging.info(f"[+] Found {len(all_pending_items)} pending feeds. Pushing {len(items_to_process)} feeds through the AI Pipeline...")
+        
+        # Run the analysis loop exactly as it operates standalone
+        for item in items_to_process:
+            try:
+                run_analysis.process_single_item(item, db_conn=db_conn, is_mock=False)
+            except Exception as e:
+                logging.error(f"[-] LLM/Analysis error while processing feed '{item.get('title')}': {str(e)}")
+                
+        logging.info("[+] Phase 3 & 4 completed successfully!")
+        
+    except Exception as e:
+        logging.error(f"[-] Critical error in Phase 3: {str(e)}")
+    finally:
+        db_conn.close()
+        logging.info("Phase 3 disconnected from the Database.")
+        
 
 def run_full(cfg: dict):
     """Runs the entire end-to-end intelligence pipeline sequentially."""

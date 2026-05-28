@@ -12,24 +12,33 @@ MODEL_NAME = "qwen2.5:7b-instruct-q4_K_M"
 # ==============================================================================
 
 EXEC_SYSTEM = """You are a Chief Information Security Officer (CISO). 
-Write a concise Executive Summary (max 3 paragraphs) for the Board of Directors.
+Write a concise Executive Summary (max 3 short paragraphs) for the Board of Directors.
 Focus on: Business Risk, Potential Impact (Financial/Reputational), and High-level recommendations.
-Do NOT use overly technical jargon. Use Markdown formatting."""
+Do NOT use technical jargon like CVEs or IP addresses. Use Markdown formatting.
+End the report with a bold sentence starting with "Executive Action Required:"."""
 
 TECH_SYSTEM = """You are a Senior Threat Intelligence Analyst.
 Write a detailed Technical Report for the Security Operations Center (SOC) team.
 Focus on: Attack Vectors, CVE details, MITRE ATT&CK techniques, and tactical behavior.
-Use Markdown formatting with clear headings and lists."""
+Format:
+1. Threat Overview
+2. Technical Breakdown
+3. Analyzed TTPs
+Use Markdown formatting with clear headings and bullet lists. Keep it strictly technical."""
 
 OPS_SYSTEM = """You are a Security Operations Lead.
 Write a strict, actionable Mitigation Plan for System Administrators and Network Engineers.
-Focus on: Immediate actions, Firewall blocking instructions for IOCs, and patching directives.
-Keep it bulleted, direct, and instructional. Use Markdown formatting."""
+Focus ONLY on actionable items:
+- IPs/Domains to block on Firewalls.
+- Specific patching or configuration changes.
+Keep it bulleted, direct, and instructional. Use Markdown formatting.
+Do NOT include background fluff."""
 
-def call_llm_for_report(system_prompt: str, data_context: str) -> str:
+def call_llm_for_report(system_prompt: str, data_context: str, max_tokens: int = 400) -> str:
     """
     Calls the LLM to generate a report.
-    Temperature is slightly increased to 0.3 for a smoother and more natural writing style.
+    Temperature is slightly increased to 0.3 for a smoother writing style.
+    num_predict limits the output length to avoid infinite generation loops.
     """
     payload = {
         "model": MODEL_NAME,
@@ -37,12 +46,12 @@ def call_llm_for_report(system_prompt: str, data_context: str) -> str:
         "system": system_prompt,
         "stream": False,
         "options": {
-            "temperature": 0.3
+            "temperature": 0.3,
+            "num_predict": max_tokens # Ngăn chặn AI viết quá dài gây treo máy
         }
     }
     
     try:
-        # Increased timeout to 120s for long reports to prevent connection drops
         response = requests.post(OLLAMA_API_URL, json=payload, timeout=120)
         response.raise_for_status()
         return response.json().get("response", "").strip()
@@ -63,15 +72,15 @@ def generate_multi_tier_reports(threat_data: dict, iocs: dict, report_title: str
     }
     data_context = json.dumps(context_dict, indent=2)
     
-    # Generate the 3 types of reports
-    print("[1/3] Writing Executive Report...")
-    exec_report = call_llm_for_report(EXEC_SYSTEM, data_context)
+    # Generate the 3 types of reports (with distinct length limits)
+    print("      [1/3] Writing Executive Report...")
+    exec_report = call_llm_for_report(EXEC_SYSTEM, data_context, max_tokens=300)
     
-    print("[2/3] Writing Technical Report...")
-    tech_report = call_llm_for_report(TECH_SYSTEM, data_context)
+    print("      [2/3] Writing Technical Report...")
+    tech_report = call_llm_for_report(TECH_SYSTEM, data_context, max_tokens=600)
     
-    print("[3/3] Writing Operational Directives...")
-    ops_report = call_llm_for_report(OPS_SYSTEM, data_context)
+    print("      [3/3] Writing Operational Directives...")
+    ops_report = call_llm_for_report(OPS_SYSTEM, data_context, max_tokens=350)
     
     # Save files
     save_reports_to_disk(report_title, exec_report, tech_report, ops_report)
@@ -84,21 +93,23 @@ def save_reports_to_disk(base_name: str, exec_md: str, tech_md: str, ops_md: str
     # Normalize filename (remove spaces, convert non-alphanumeric to underscores)
     safe_name = "".join([c if c.isalnum() else "_" for c in base_name]).lower()
     
+    # Rút gọn tên file nếu nó quá dài (phòng trường hợp lỗi hệ điều hành)
+    if len(safe_name) > 100:
+        safe_name = safe_name[:90] + "_trim"
+        
     files_to_save = {
         f"{safe_name}_01_executive.md": exec_md,
         f"{safe_name}_02_technical.md": tech_md,
         f"{safe_name}_03_operational.md": ops_md
     }
     
-    print("\n[+] Successfully saved report files at:")
     for filename, content in files_to_save.items():
         file_path = os.path.join(output_dir, filename)
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            print(f"    -> {file_path}")
         except Exception as e:
-            print(f"[-] Error saving {filename}: {e}")
+            print(f"      [-] Error saving {filename}: {e}")
 
 # ==================== MOCK TEST (NO DATABASE NEEDED) ====================
 if __name__ == "__main__":

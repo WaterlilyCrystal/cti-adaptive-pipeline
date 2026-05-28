@@ -3,6 +3,7 @@
 config_local.yaml
 
 # Data files 
+output/
 data/
 *.db
 *.sqlite

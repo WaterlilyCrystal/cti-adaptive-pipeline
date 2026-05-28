@@ -2,12 +2,11 @@ import argparse
 import json
 import time
 
-
 from utils import db_handler
 from analysis import llm_caller, ttp_mapper, sigma_engine, ioc_extractor
 from reporting import reporter
 
-def process_single_item(item: dict, is_mock: bool = False):
+def process_single_item(item: dict, db_conn=None, is_mock: bool = False):
     """
     Linear processing function for a SINGLE threat intelligence feed.
     Executes the full pipeline from IOC extraction to report generation.
@@ -23,7 +22,7 @@ def process_single_item(item: dict, is_mock: bool = False):
     # STEP 1: STATIC IOC EXTRACTION
     print("\n[Step 1] Extracting IOCs via Regex...")
     iocs = ioc_extractor.extract_all_iocs(content)
-    print(f"   -> Found: {len(iocs.get('ips', []))} IPs, {len(iocs.get('domains', []))} Domains, {len(iocs.get('cves', []))} CVEs.")
+    print(f"   -> Found: {len(iocs.get('ips', []))} IPs, {len(iocs.get('urls', []))} URLs, {len(iocs.get('cves', []))} CVEs.")
 
     # STEP 2: SEMANTIC ANALYSIS VIA LLM (JSON)
     print("\n[Step 2] Activating Ollama for CTI semantic analysis...")
@@ -58,6 +57,10 @@ def process_single_item(item: dict, is_mock: bool = False):
         if sigma_yaml:
             safe_filename = f"detect_{tech_id}_{item_id[-6:]}.yml".lower()
             sigma_engine.validate_and_save_yaml(sigma_yaml, safe_filename)
+            
+            # --- TÍCH HỢP NATIVE DB: Lưu luật Sigma vào database ---
+            if not is_mock and db_conn:
+                db_handler.save_sigma_rule(db_conn, item_id, tech_id, sigma_yaml)
 
     # Update the original data with cleaned and evidenced TTPs
     cti_data['validated_ttps'] = valid_ttps
@@ -67,13 +70,26 @@ def process_single_item(item: dict, is_mock: bool = False):
     reporter.generate_multi_tier_reports(cti_data, iocs, title)
 
     # STEP 6: SAVE TO DATABASE (ONLY RUNS WHEN NOT IN MOCK MODE)
-    if not is_mock:
-        print("\n[Step 6] Updating results to Database...")
-        db_handler.update_item_iocs(item_id, iocs)
-        db_handler.mark_item_as_completed(item_id)
-        print("   -> Database saved successfully.")
+    if not is_mock and db_conn:
+        print("\n[Step 6] Updating analysis results back to Database...")
+        # Chuyển đổi severity thành điểm relevance giả định (cao = 0.9, thấp = 0.5)
+        relevance_score = 0.9 if cti_data.get('severity', '').lower() in ['high', 'critical'] else 0.5
+        
+        # Gọi chính xác hàm update_analysis từ db_handler của nhóm
+        success = db_handler.update_analysis(
+            conn=db_conn,
+            item_id=item_id,
+            raw_iocs=iocs,
+            ttp_mapping=valid_ttps,
+            relevance=relevance_score
+        )
+        
+        if success:
+            print("   -> Database updated successfully (Processed flag set to 1).")
+        else:
+            print("   [-] Failed to update Database.")
     else:
-        print("\n[Step 6] Mock Mode: Skipping Database update.")
+        print("\n[Step 6] Mock Mode / No DB Connection: Skipping Database update.")
 
     print(f"\n✅ ANALYSIS COMPLETE: {title}")
 
@@ -91,22 +107,32 @@ def main():
             "content": "We have observed the APT29 threat group utilizing a new unauthenticated RCE vulnerability (CVE-2026-9999) in Nginx 1.25.x. Attackers send a malformed HTTP/2 request to port 443. Once exploited, it drops a web shell payload named '/tmp/.nginx_update' to maintain persistence from IP 185.220.101.45. We highly recommend disabling HTTP/2 immediately.",
         }
         start_time = time.time()
-        process_single_item(mock_item, is_mock=True)
+        process_single_item(mock_item, db_conn=None, is_mock=True)
         print(f"\n⏱ Total execution time (Mock): {round(time.time() - start_time, 2)} seconds")
         
     else:
         print("[*] INITIALIZING PRODUCTION PIPELINE")
-        items = db_handler.get_unprocessed_items(limit=5)
+        
+        # --- TÍCH HỢP NATIVE DB: Khởi tạo kết nối và gọi hàm get_pending ---
+        conn = db_handler.init_db()
+        all_pending_items = db_handler.get_pending(conn)
+        
+        # Chỉ lấy tối đa 5 bản tin để tránh quá tải LLM trong 1 lần chạy
+        items = all_pending_items[:5] 
         
         if not items:
             print("[-] No new articles to analyze in the Database. System going to sleep.")
+            conn.close()
             return
 
-        print(f"[+] Found {len(items)} articles to analyze. Starting processing...")
+        print(f"[+] Found {len(all_pending_items)} pending items. Processing first {len(items)} items...")
         start_time = time.time()
+        
         for item in items:
-            process_single_item(item, is_mock=False)
+            process_single_item(item, db_conn=conn, is_mock=False)
+            
         print(f"\n⏱ Total execution time for {len(items)} articles: {round(time.time() - start_time, 2)} seconds")
+        conn.close()
 
 if __name__ == "__main__":
     main()
