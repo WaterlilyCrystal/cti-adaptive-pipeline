@@ -11,7 +11,7 @@ from utils.monitor import get_effective_available_ram_gb
 logger = logging.getLogger("ollama_client")
 
 DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:7b-instruct-q4_K_M"
+DEFAULT_MODEL = "qwen2.5:3b-instruct-q4_K_M"
 _cooldown_until = 0.0
 _selected_model = None
 
@@ -42,7 +42,15 @@ def get_model_candidates(cfg: Dict | None = None) -> list[str]:
     return candidates
 
 
-def estimate_model_min_ram_gb(model_name: str) -> float:
+def estimate_model_min_ram_gb(model_name: str, cfg: Dict | None = None) -> float:
+    overrides = (_llm_cfg(cfg).get("model_min_ram_overrides") or {}) if cfg else {}
+    override_value = overrides.get(model_name)
+    try:
+        if override_value is not None:
+            return max(1.0, float(override_value))
+    except (TypeError, ValueError):
+        pass
+
     lower = model_name.lower()
     match = re.search(r"(\d+(?:\.\d+)?)b", lower)
     if match:
@@ -53,7 +61,7 @@ def estimate_model_min_ram_gb(model_name: str) -> float:
     if params_b <= 1.5:
         required = 2.5
     elif params_b <= 3.5:
-        required = 4.0
+        required = 3.5
     elif params_b <= 7.5:
         required = 8.0
     elif params_b <= 9.0:
@@ -85,6 +93,27 @@ def _request_timeout(cfg: Dict | None = None, default: int = 60) -> int:
         return default
 
 
+def _label_timeout(cfg: Dict | None, request_label: str, default: int) -> int:
+    llm_cfg = _llm_cfg(cfg)
+    key_map = {
+        "report": "report_timeout_seconds",
+        "summary": "report_timeout_seconds",
+        "reasoning": "reasoning_timeout_seconds",
+    }
+    selected_key = ""
+    lowered = request_label.lower()
+    for marker, key in key_map.items():
+        if marker in lowered:
+            selected_key = key
+            break
+    if not selected_key:
+        return default
+    try:
+        return max(5, int(llm_cfg.get(selected_key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _num_ctx(cfg: Dict | None = None) -> int:
     try:
         return max(1024, int(_llm_cfg(cfg).get("num_ctx", 8192)))
@@ -104,6 +133,20 @@ def _probe_num_ctx(cfg: Dict | None = None) -> int:
         return max(256, min(int(_llm_cfg(cfg).get("probe_num_ctx", 512)), _num_ctx(cfg)))
     except (TypeError, ValueError):
         return 512
+
+
+def _probe_timeout_seconds(cfg: Dict | None = None, fallback: int = 30) -> int:
+    try:
+        return max(10, int(_llm_cfg(cfg).get("probe_timeout_seconds", fallback)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _probe_retries(cfg: Dict | None = None, fallback: int = 2) -> int:
+    try:
+        return max(1, min(int(_llm_cfg(cfg).get("probe_retries", fallback)), 5))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _set_cooldown(cfg: Dict | None, reason: str) -> None:
@@ -147,8 +190,9 @@ def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
     global _selected_model
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
+    tags_timeout = min(timeout, _probe_timeout_seconds(cfg))
     try:
-        response = requests.get(f"{base_url}/api/tags", timeout=timeout)
+        response = requests.get(f"{base_url}/api/tags", timeout=tags_timeout)
         response.raise_for_status()
     except requests.RequestException as exc:
         _set_cooldown(cfg, f"health probe failed: {exc}")
@@ -158,7 +202,7 @@ def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
     last_error = None
     eligible_models = []
     for model_name in get_model_candidates(cfg):
-        required_ram_gb = estimate_model_min_ram_gb(model_name)
+        required_ram_gb = estimate_model_min_ram_gb(model_name, cfg)
         if available_ram_gb >= required_ram_gb:
             eligible_models.append(model_name)
         else:
@@ -177,6 +221,9 @@ def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
             f"effective_ram_gb={available_ram_gb:.2f}, models={configured}"
         )
 
+    probe_timeout = _probe_timeout_seconds(cfg)
+    probe_retries = _probe_retries(cfg)
+
     for model_name in eligible_models:
         payload = {
             "model": model_name,
@@ -188,22 +235,27 @@ def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
                 "num_predict": 8,
             },
         }
-        try:
-            response = requests.post(f"{base_url}/api/generate", json=payload, timeout=max(timeout, 10))
-            response.raise_for_status()
-            text = response.json().get("response", "")
-            if text.strip():
-                _selected_model = model_name
-                logger.info("Ollama probe succeeded with model %s", model_name)
-                return
-            last_error = f"Empty response from model {model_name}"
-        except requests.exceptions.HTTPError as exc:
-            detail = _extract_error_message(exc)
-            logger.warning("Ollama probe failed for model %s: %s", model_name, detail)
-            last_error = f"{model_name}: {_format_runtime_hint(detail)}"
-        except (requests.RequestException, ValueError) as exc:
-            logger.warning("Ollama probe failed for model %s: %s", model_name, exc)
-            last_error = f"{model_name}: {exc}"
+        for attempt in range(probe_retries):
+            try:
+                response = requests.post(f"{base_url}/api/generate", json=payload, timeout=probe_timeout)
+                response.raise_for_status()
+                text = response.json().get("response", "")
+                if text.strip():
+                    _selected_model = model_name
+                    logger.info("Ollama probe succeeded with model %s", model_name)
+                    return
+                last_error = f"Empty response from model {model_name}"
+            except requests.exceptions.HTTPError as exc:
+                detail = _extract_error_message(exc)
+                logger.warning("Ollama probe failed for model %s attempt %s/%s: %s", model_name, attempt + 1, probe_retries, detail)
+                last_error = f"{model_name}: {_format_runtime_hint(detail)}"
+            except (requests.RequestException, ValueError) as exc:
+                logger.warning("Ollama probe failed for model %s attempt %s/%s: %s", model_name, attempt + 1, probe_retries, exc)
+                last_error = f"{model_name}: {exc}"
+
+            if attempt < probe_retries - 1:
+                wait_time = min(8, 2 ** attempt)
+                time.sleep(wait_time)
 
     _set_cooldown(cfg, f"health probe failed: {last_error}")
     raise OllamaServiceError(f"Ollama probe could not load any configured model. {last_error}")
@@ -221,7 +273,7 @@ def generate_text(
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
     headers = {"Content-Type": "application/json"}
-    timeout = _request_timeout(cfg)
+    timeout = _label_timeout(cfg, request_label, _request_timeout(cfg))
     max_retries = _max_retries(cfg)
     model_name = _selected_model or get_model_name(cfg)
     payload = {

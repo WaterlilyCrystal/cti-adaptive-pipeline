@@ -4,7 +4,7 @@ import logging
 from analysis.ollama_client import OllamaServiceError, generate_text
 
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen2.5:7b-instruct-q4_K_M"
+MODEL_NAME = "qwen2.5:3b-instruct-q4_K_M"
 logger = logging.getLogger("llm_caller")
 
 SYSTEM_PROMPT = """You are a senior Cyber Threat Intelligence (CTI) analyst.

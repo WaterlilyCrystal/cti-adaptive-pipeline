@@ -1,15 +1,25 @@
 # ── LLM ──────────────────────────────────────────────────
 llm:
   runtime: ollama
-  model: qwen2.5:7b-instruct-q4_K_M
+  model: qwen2.5:3b-instruct-q4_K_M
   fallback_models: []
+  model_min_ram_overrides:
+    qwen2.5:3b-instruct-q4_K_M: 3.5
   base_url: http://localhost:11434
   num_ctx: 8192
   probe_num_ctx: 512
   temperature: 0.1
   max_retries: 2
   request_timeout_seconds: 60
+  report_timeout_seconds: 25
+  reasoning_timeout_seconds: 30
+  probe_timeout_seconds: 45
+  probe_retries: 3
   cooldown_seconds: 180
+
+reporting:
+  mode: fast
+  generate_secondary_language_summary: false
 
 resources:
   auto_tune: true

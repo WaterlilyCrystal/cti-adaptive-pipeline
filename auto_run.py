@@ -1,43 +1,57 @@
-import time
-import subprocess
 import logging
-from datetime import datetime
+import subprocess
+import time
+from datetime import datetime, timedelta
 
-# Configure the waiting time between pipeline runs (in minutes)
-# For demo/defense purposes, set to 5. For production, set to 60 or 120.
-WAIT_TIME_MINUTES = 60 
+from utils import db_handler
 
-# Configure logging format
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def run_pipeline():
-    """
-    Executes the main pipeline orchestrator as a subprocess.
-    """
-    logging.info("="*60)
-    logging.info(f"[{datetime.now().strftime('%H:%M:%S')}] ACTIVATING NEW PIPELINE CYCLE...")
-    logging.info("="*60)
-    
+JOBS = {
+    "social_ingestion": {"tier": "social", "interval_hours": 2},
+    "news_ingestion": {"tier": "news", "interval_hours": 6},
+    "vulnerability_sync": {"tier": "vuln", "interval_hours": 24},
+    "phase2_processing": {"phase": "process", "interval_hours": 2},
+    "phase3_analysis": {"phase": "analyze", "interval_hours": 2},
+}
+
+
+def run_pipeline_command(args: list[str]) -> bool:
     try:
-        # Executes the equivalent of typing `python pipeline.py --phase all` in the terminal
-        subprocess.run(["python", "pipeline.py", "--phase", "all"], check=True)
-        logging.info("[+] Pipeline cycle completed successfully.")
-        
-    except subprocess.CalledProcessError as e:
-        logging.error(f"[-] An error occurred during Pipeline execution: {e}")
-    except FileNotFoundError:
-        logging.error("[-] pipeline.py not found. Please ensure you are running this from the root project directory.")
+        subprocess.run(["python", "pipeline.py", *args], check=True)
+        return True
+    except subprocess.CalledProcessError as exc:
+        logging.error("Pipeline command failed: %s", exc)
+        return False
+
+
+def daemon_loop():
+    logging.info("Adaptive CTI stratified scheduler started.")
+    next_runs = {
+        job_name: datetime.now()
+        for job_name in JOBS
+    }
+
+    while True:
+        now = datetime.now()
+        for job_name, job in JOBS.items():
+            if now < next_runs[job_name]:
+                continue
+
+            logging.info("[%s] Running job: %s", now.isoformat(), job_name)
+            if "tier" in job:
+                run_pipeline_command(["--phase", "collect", "--tier", job["tier"]])
+            else:
+                run_pipeline_command(["--phase", job["phase"]])
+
+            next_time = now + timedelta(hours=job["interval_hours"])
+            next_runs[job_name] = next_time
+            conn = db_handler.init_db()
+            db_handler.touch_scheduler_job(conn, job_name, next_time.isoformat())
+            conn.close()
+
+        time.sleep(60)
+
 
 if __name__ == "__main__":
-    logging.info("🚀 Adaptive CTI Auto-Scheduler Daemon Started.")
-    logging.info(f"⏳ Execution frequency set to: {WAIT_TIME_MINUTES} minutes per run.")
-    
-    while True:
-        # 1. Trigger the pipeline
-        run_pipeline()
-        
-        # 2. Calculate sleep time and enter idle state
-        next_run_seconds = WAIT_TIME_MINUTES * 60
-        logging.info(f"💤 System entering idle state. Waking up in {WAIT_TIME_MINUTES} minutes...")
-        
-        time.sleep(next_run_seconds)
+    daemon_loop()

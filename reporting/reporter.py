@@ -6,8 +6,9 @@ from datetime import datetime
 from analysis.ollama_client import OllamaServiceError, generate_text
 
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen2.5:7b-instruct-q4_K_M"
+MODEL_NAME = "qwen2.5:3b-instruct-q4_K_M"
 logger = logging.getLogger("reporter")
+REPORT_KEYS = ("executive", "technical", "operational")
 
 EXEC_SYSTEM = {
     "en": """You are a Chief Information Security Officer (CISO).
@@ -61,8 +62,50 @@ def generate_executive_summary(threat_data: dict, iocs: dict, language: str = "e
     )
 
 
+def _fallback_report(threat_data: dict, iocs: dict, report_title: str) -> dict:
+    severity = threat_data.get("severity", "low")
+    summary = threat_data.get("summary_one_line") or report_title
+    techniques = threat_data.get("validated_ttps", []) or []
+    technique_lines = [
+        f"- {ttp.get('technique_id', '')}: {ttp.get('technique_name_official', '')}".strip()
+        for ttp in techniques
+    ]
+    ioc_lines = []
+    for key in ["cves", "ips", "domains", "urls", "hashes"]:
+        values = iocs.get(key, []) or []
+        if values:
+            ioc_lines.append(f"- {key}: {', '.join(values[:10])}")
+
+    executive = f"## Executive Summary\n\nSeverity: **{severity}**\n\n{summary}\n"
+    technical = "## Technical Report\n\n"
+    technical += f"- Attack vector: {threat_data.get('attack_vector', 'Unknown') or 'Unknown'}\n"
+    technical += "\n### MITRE ATT&CK\n"
+    technical += "\n".join(technique_lines) if technique_lines else "- No validated technique mapped."
+    technical += "\n\n### IOCs\n"
+    technical += "\n".join(ioc_lines) if ioc_lines else "- No concrete IOCs extracted."
+    operational = "## Operational Plan\n\n"
+    operational += "- Review affected assets against the organization profile.\n"
+    operational += "- Prioritize patching or exposure reduction for matched technologies.\n"
+    operational += "- Monitor logs for the listed indicators and validated ATT&CK behavior.\n"
+    return {
+        "executive": executive,
+        "technical": technical,
+        "operational": operational,
+    }
+
+
+def _report_mode(cfg: dict | None) -> str:
+    return str((cfg or {}).get("reporting", {}).get("mode", "fast")).lower()
+
+
 def generate_multi_tier_reports(threat_data: dict, iocs: dict, report_title: str, language: str = "en", cfg: dict | None = None):
     print(f"[*] Initializing Multi-Tier Reports for: {report_title}...")
+    fallback = _fallback_report(threat_data, iocs, report_title)
+    mode = _report_mode(cfg)
+    if mode in {"off", "template"}:
+        save_reports_to_disk(report_title, fallback["executive"], fallback["technical"], fallback["operational"])
+        return fallback
+
     context_dict = {
         "threat_analysis": threat_data,
         "indicators_of_compromise": iocs,
@@ -78,14 +121,22 @@ def generate_multi_tier_reports(threat_data: dict, iocs: dict, report_title: str
         label=f"executive-report-{language}",
     )
     if not exec_report:
-        return {
-            "executive": "",
-            "technical": "",
-            "operational": "",
+        save_reports_to_disk(report_title, fallback["executive"], fallback["technical"], fallback["operational"])
+        return fallback
+
+    if mode == "fast":
+        reports = {
+            "executive": exec_report,
+            "technical": fallback["technical"],
+            "operational": fallback["operational"],
         }
+        save_reports_to_disk(report_title, reports["executive"], reports["technical"], reports["operational"])
+        return reports
 
     tech_report = call_llm_for_report(TECH_SYSTEM, data_context, max_tokens=600, cfg=cfg, label="technical-report")
     ops_report = call_llm_for_report(OPS_SYSTEM, data_context, max_tokens=350, cfg=cfg, label="operational-report")
+    tech_report = tech_report or fallback["technical"]
+    ops_report = ops_report or fallback["operational"]
     save_reports_to_disk(report_title, exec_report, tech_report, ops_report)
     return {
         "executive": exec_report,

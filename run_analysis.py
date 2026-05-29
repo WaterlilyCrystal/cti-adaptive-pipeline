@@ -105,12 +105,13 @@ def process_single_item(item: dict, cfg: dict | None = None, db_conn=None, is_mo
 
     print("\n[Step 5] Generating reports...")
     reports = reporter.generate_multi_tier_reports(cti_data, iocs, title, language=preferred_language, cfg=cfg)
-    if reports["executive"]:
+    generate_secondary_summaries = bool((cfg.get("reporting") or {}).get("generate_secondary_language_summary", False))
+    if reports["executive"] and generate_secondary_summaries:
         executive_vi = reports["executive"] if preferred_language == "vi" else reporter.generate_executive_summary(cti_data, iocs, language="vi", cfg=cfg)
         executive_en = reports["executive"] if preferred_language == "en" else reporter.generate_executive_summary(cti_data, iocs, language="en", cfg=cfg)
     else:
-        executive_vi = ""
-        executive_en = ""
+        executive_vi = reports["executive"] if preferred_language == "vi" else ""
+        executive_en = reports["executive"] if preferred_language == "en" else ""
 
     if not is_mock and db_conn:
         print("\n[Step 6] Updating analysis results back to Database...")
