@@ -1,20 +1,23 @@
 import json
-import requests
+import logging
 
-# The default local API endpoint for Ollama
+from analysis.ollama_client import OllamaServiceError, generate_text
+
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
-# The exact model name you pulled earlier
-MODEL_NAME = "qwen2.5:7b-instruct-q4_K_M"
+MODEL_NAME = "qwen2.5:3b-instruct-q4_K_M"
+logger = logging.getLogger("llm_caller")
 
-# ==============================================================================
-# STRICT PROMPT TEMPLATES (TASK 2 & 4)
-# ==============================================================================
 SYSTEM_PROMPT = """You are a senior Cyber Threat Intelligence (CTI) analyst.
 Your task is to analyze threat intelligence reports and extract structured data.
 You MUST respond ONLY with valid JSON. Do not include any introductory or concluding text (like "Here is the JSON").
 Start your response with '{' and end with '}'."""
 
 ANALYSIS_PROMPT = """Analyze the following threat intelligence content.
+
+CRITICAL RULES FOR MITRE ATT&CK MAPPING:
+1. You MUST ONLY extract real, officially documented MITRE ATT&CK technique IDs (e.g., T1566 for Phishing, T1190 for Exploit Public-Facing Application).
+2. NEVER invent, guess, or use placeholder codes like 'T1234' or 'T0000'.
+3. If you cannot confidently map a real technique, leave the "suggested_techniques" array EMPTY []. Do not hallucinate.
 
 CONTENT:
 {content}
@@ -28,7 +31,7 @@ Respond with this EXACT JSON structure. If a field is not found, use an empty li
   "attack_vector": "brief description",
   "suggested_techniques": [
     {{
-      "technique_id": "T1234",
+      "technique_id": "T1566",
       "confidence": "high/medium/low"
     }}
   ],
@@ -45,38 +48,17 @@ You MUST quote the specific behavior from the content that matches.
 Format exactly like this: "This maps to {technique_id} because [specific behavior] observed in '[exact quote from text]'."
 """
 
-def call_ollama(prompt: str, system: str = "", temperature: float = 0.1) -> str:
-    """
-    Sends a prompt to the local Ollama API and returns the raw text response.
-    Temperature is set very low (0.1) to prevent hallucinations and enforce formatting.
-    """
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "system": system,
-        "stream": False,
-        "options": {
-            "temperature": temperature
-        }
-    }
-    
-    try:
-        response = requests.post(OLLAMA_API_URL, json=payload, timeout=60)
-        response.raise_for_status()
-        return response.json().get("response", "")
-    except requests.exceptions.RequestException as e:
-        print(f"[-] Ollama connection error: {e}")
-        return ""
-
-def extract_cti_data(content: str) -> dict:
-    """
-    Forces the LLM to read the content and return a structured JSON dictionary.
-    Includes a fallback mechanism if the JSON parsing fails.
-    """
+def extract_cti_data(content: str, item_id: str = "", title: str = "", cfg: dict | None = None) -> dict:
     print("[*] Sending content to LLM for JSON extraction...")
     formatted_prompt = ANALYSIS_PROMPT.format(content=content)
-    
-    raw_response = call_ollama(prompt=formatted_prompt, system=SYSTEM_PROMPT, temperature=0.1)
+    raw_response = generate_text(
+        prompt=formatted_prompt,
+        system=SYSTEM_PROMPT,
+        temperature=0.1,
+        max_tokens=1024,
+        cfg=cfg,
+        request_label=f"cti extraction item_id={item_id}",
+    )
     
     # Clean up the response just in case the LLM added markdown code blocks (```json ... ```)
     raw_response = raw_response.strip()
@@ -91,33 +73,44 @@ def extract_cti_data(content: str) -> dict:
         print("[+] Successfully parsed JSON from LLM.")
         return parsed_json
     except json.JSONDecodeError as e:
-        print(f"[-] LLM JSON Format Error: {e}")
-        print(f"Raw Output: {raw_response}")
-        # Fallback template to prevent pipeline crash
+        logger.error(
+            "LLM JSON parse error for item_id=%s title=%r: %s | raw_response=%r",
+            item_id,
+            title[:160],
+            e,
+            raw_response[:2000],
+        )
         return {
             "is_new_threat": False,
             "severity": "low",
             "threat_actors": [],
             "malware_families": [],
-            "attack_vector": "Failed to parse LLM output",
+            "attack_vector": "",
             "suggested_techniques": [],
-            "summary_one_line": "Error during analysis."
+            "summary_one_line": "",
+            "_analysis_failed": True,
         }
 
-def generate_reasoning(content: str, technique_id: str, technique_name: str) -> str:
-    """
-    Forces the LLM to explain WHY it chose a specific MITRE technique by quoting the text.
-    """
+def generate_reasoning(content: str, technique_id: str, technique_name: str, cfg: dict | None = None) -> str:
     print(f"[*] Generating evidentiary reasoning for {technique_id}...")
     formatted_prompt = REASONING_PROMPT.format(
-        content=content[:2000], # Limit content size to save context window
+        content=content[:2000],
         technique_id=technique_id,
         technique_name=technique_name
     )
-    
-    # We can use a slightly higher temperature (0.2) here since it's generating natural language
-    reasoning = call_ollama(prompt=formatted_prompt, system="You are an analytical assistant.", temperature=0.2)
-    return reasoning.strip()
+    try:
+        reasoning = generate_text(
+            prompt=formatted_prompt,
+            system="You are an analytical assistant.",
+            temperature=0.2,
+            max_tokens=220,
+            cfg=cfg,
+            request_label=f"reasoning {technique_id}",
+        )
+        return reasoning.strip()
+    except OllamaServiceError as exc:
+        logger.warning("Skipping reasoning for %s: %s", technique_id, exc)
+        return ""
 
 # ==================== MOCK TEST (NO DATABASE NEEDED) ====================
 if __name__ == "__main__":

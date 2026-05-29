@@ -5,7 +5,7 @@ Hệ thống tự động thu thập, phân tích Cyber Threat Intelligence và 
 ## Dành cho tổ chức chưa có đội TI riêng
 
 ## Tech Stack
-- **LLM**: Ollama + Qwen 2.5 7B (local, không cần cloud)
+- **LLM**: Ollama + Qwen 2.5 3B (local, không cần cloud)
 - **ATT&CK**: mitreattack-python (official MITRE library)
 - **IOC**: iocextract
 - **Storage**: SQLite + ChromaDB
@@ -16,7 +16,7 @@ Hệ thống tự động thu thập, phân tích Cyber Threat Intelligence và 
 ```bash
 # 1. Cài Ollama và pull model
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama pull qwen2.5:3b-instruct-q4_K_M
 
 # 2. Cài Python dependencies
 pip install -r requirements.txt

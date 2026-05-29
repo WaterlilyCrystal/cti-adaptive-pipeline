@@ -1,20 +1,49 @@
 # ── LLM ──────────────────────────────────────────────────
 llm:
   runtime: ollama
-  model: qwen2.5:7b-instruct-q4_K_M
+  model: qwen2.5:3b-instruct-q4_K_M
+  fallback_models: []
+  model_min_ram_overrides:
+    qwen2.5:3b-instruct-q4_K_M: 3.5
   base_url: http://localhost:11434
   num_ctx: 8192
+  probe_num_ctx: 512
   temperature: 0.1
+  max_retries: 2
+  request_timeout_seconds: 60
+  report_timeout_seconds: 25
+  reasoning_timeout_seconds: 30
+  probe_timeout_seconds: 45
+  probe_retries: 3
+  cooldown_seconds: 180
+
+reporting:
+  mode: fast
+  generate_secondary_language_summary: false
+
+resources:
+  auto_tune: true
+  available_ram_gb_override: 0
+  reserve_ram_gb: 2
 
 # ── Org Profile ──────────────────────────────────────────
 org_profile:
   name: "Demo Org"
   industry: finance
-  os: ["Ubuntu 22.04", "Windows Server 2022"]
+  preferred_language: en
+  preferred_languages: ["en", "vi"]
+  public_domain: ""
+  os: ["Ubuntu", "Windows Server"]
   web: ["Nginx"]
   db: ["PostgreSQL", "Redis"]
+  frameworks: ["NodeJS", "React"]
   cloud: ["AWS"]
   exposed_services: ["443", "22", "VPN"]
+
+tech_discovery:
+  provider: none
+  timeout: 10
+  live: false
 
 # ── Sources ──────────────────────────────────────────────
 sources:
@@ -48,6 +77,15 @@ pipeline:
   min_confidence: 0.50    # Bỏ qua item dưới ngưỡng này
   max_content_chars: 5000 # Cắt content trước khi đưa vào LLM
   ram_threshold_pct: 85   # Auto-pause khi RAM vượt ngưỡng này
+  phase3_max_items: 5     # Max items per Phase 3 run. Recommend 5-10 to prevent LLM overload (was 0=unlimited which caused the issue!)
+  phase3_stop_after_consecutive_llm_failures: 1
+  
+  # === RAM OPTIMIZATION SETTINGS ===
+  # ⚠️  IMPORTANT: Semantic dedup is VERY SLOW with >1000 items
+  # For large datasets (1000+ items), keep it DISABLED unless you have time
+  enable_semantic_dedup: false       # Set to false for 10-20x faster processing (URL + hash = 90% effective)
+  dedup_window_size: 50              # Only used if semantic_dedup is enabled
+  batch_processing_size: 500         # Process N items at a time (smaller = less RAM, more DB queries)
 
 # ── API Keys (để trống ở đây, điền vào .env) ────────────
 api_keys:
@@ -57,3 +95,10 @@ api_keys:
   telegram_api_id: ""
   telegram_api_hash: ""
   otx_api_key: ""
+  builtwith_api_key: ""
+  wappalyzer_api_key: ""
+
+notifications:
+  email: []
+  slack: []
+  zalo: []
