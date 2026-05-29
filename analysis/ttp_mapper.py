@@ -1,73 +1,128 @@
+from __future__ import annotations
+
+import json
+import logging
 import os
-from mitreattack.stix20 import MitreAttackData
+from typing import Dict, List
 
-# Path to the MITRE JSON file
-MITRE_DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "enterprise-attack.json")
+logger = logging.getLogger("ttp_mapper")
 
-print("[*] Loading MITRE ATT&CK dictionary into memory (This will take a few seconds)...")
-try:
-    mitre_attack_data = MitreAttackData(MITRE_DATA_PATH)
-    print("[+] MITRE dictionary loaded successfully!")
-except Exception as e:
-    print(f"[-] ERROR: Cannot read the MITRE file. Please check the path {MITRE_DATA_PATH}. Details: {e}")
-    mitre_attack_data = None
+BASE_DIR = os.path.dirname(os.path.dirname(__file__))
+MITRE_DATA_PATH = os.path.join(BASE_DIR, "data", "enterprise-attack.json")
+MITRE_INDEX_PATH = os.path.join(BASE_DIR, "data", "enterprise-attack-index.json")
+_mitre_index: Dict[str, Dict] | None = None
+
+
+def _load_json(path: str) -> Dict:
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _extract_attack_id(external_references: List[Dict]) -> str:
+    for reference in external_references or []:
+        external_id = reference.get("external_id", "")
+        if isinstance(external_id, str) and external_id.startswith("T"):
+            return external_id
+    return ""
+
+
+def _build_index_from_stix() -> Dict[str, Dict]:
+    logger.info("Building MITRE ATT&CK index from %s", MITRE_DATA_PATH)
+    bundle = _load_json(MITRE_DATA_PATH)
+    index: Dict[str, Dict] = {}
+
+    for obj in bundle.get("objects", []):
+        if obj.get("type") != "attack-pattern":
+            continue
+
+        attack_id = _extract_attack_id(obj.get("external_references", []))
+        if not attack_id:
+            continue
+
+        tactics = [
+            phase.get("phase_name", "")
+            for phase in obj.get("kill_chain_phases", [])
+            if isinstance(phase, dict) and phase.get("phase_name")
+        ]
+        index[attack_id] = {
+            "technique_name_official": obj.get("name", ""),
+            "tactic": tactics,
+        }
+
+    payload = {
+        "source_path": MITRE_DATA_PATH,
+        "source_mtime": os.path.getmtime(MITRE_DATA_PATH),
+        "index": index,
+    }
+    with open(MITRE_INDEX_PATH, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    logger.info("MITRE ATT&CK index cached: %s techniques", len(index))
+    return index
+
+
+def _load_cached_index() -> Dict[str, Dict] | None:
+    if not os.path.exists(MITRE_INDEX_PATH):
+        return None
+    try:
+        payload = _load_json(MITRE_INDEX_PATH)
+        if payload.get("source_path") != MITRE_DATA_PATH:
+            return None
+        if float(payload.get("source_mtime", 0)) < os.path.getmtime(MITRE_DATA_PATH):
+            return None
+        index = payload.get("index", {})
+        if isinstance(index, dict) and index:
+            logger.info("Loaded MITRE ATT&CK index cache: %s techniques", len(index))
+            return index
+    except Exception as exc:
+        logger.warning("Failed to read MITRE index cache: %s", exc)
+    return None
+
+
+def _get_mitre_index() -> Dict[str, Dict]:
+    global _mitre_index
+    if _mitre_index is not None:
+        return _mitre_index
+
+    cached = _load_cached_index()
+    if cached is not None:
+        _mitre_index = cached
+        return _mitre_index
+
+    try:
+        _mitre_index = _build_index_from_stix()
+    except Exception as exc:
+        logger.error("Cannot build MITRE ATT&CK index from %s: %s", MITRE_DATA_PATH, exc)
+        _mitre_index = {}
+    return _mitre_index
+
 
 def validate_and_enrich_ttps(llm_suggested_ttps: list) -> list:
-    """
-    Receives a list of TTPs predicted by the AI.
-    Looks up in the MITRE database to filter out fake IDs and fetch official names.
-    """
-    if not mitre_attack_data:
+    mitre_index = _get_mitre_index()
+    if not mitre_index:
         return []
 
     validated_ttps = []
-    
     for ttp in llm_suggested_ttps:
         tech_id = ttp.get("technique_id", "")
-        
-        try:
-            # BUG FIX: Use the exact, correct method from mitreattack-python
-            technique = mitre_attack_data.get_object_by_attack_id(tech_id, "attack-pattern")
-            
-            if technique:
-                # In case the library returns a list for some IDs, grab the first object
-                if isinstance(technique, list) and len(technique) > 0:
-                    technique = technique[0]
-                    
-                # If the ID is real -> Enrich the data
-                ttp["technique_name_official"] = technique.name
-                
-                # Get the tactic(s) containing this technique (Kill Chain Phases)
-                tactics = []
-                if hasattr(technique, 'kill_chain_phases'):
-                    tactics = [phase.phase_name for phase in technique.kill_chain_phases]
-                ttp["tactic"] = tactics
-                
-                ttp["is_valid"] = True
-                validated_ttps.append(ttp)
-            else:
-                # Fake ID (Hallucination)
-                print(f"[-] AI Hallucination: Rejected fake code {tech_id}")
-                
-        except Exception as e:
-            # Print the actual system error instead of swallowing it
-            print(f"[-] System error looking up {tech_id}: {e}")
-            
+        metadata = mitre_index.get(tech_id)
+        if not metadata:
+            logger.info("Rejected unknown ATT&CK technique: %s", tech_id)
+            continue
+
+        enriched = dict(ttp)
+        enriched["technique_name_official"] = metadata.get("technique_name_official", "")
+        enriched["tactic"] = metadata.get("tactic", [])
+        enriched["is_valid"] = True
+        validated_ttps.append(enriched)
+
     return validated_ttps
 
-# ==================== MOCK TEST (NO DATABASE NEEDED) ====================
+
 if __name__ == "__main__":
-    # Simulate the LLM having just analyzed an article and returning this list
-    mock_llm_output = [
-        {"technique_id": "T1566.001", "confidence": "high"}, # Phishing (Real code)
-        {"technique_id": "T1110", "confidence": "medium"},   # Brute Force (Real code)
-        {"technique_id": "T9999", "confidence": "high"},     # LLM fabricated code (Fake code)
-        {"technique_id": "T1234", "confidence": "low"}       # LLM fabricated code (Fake code)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    sample = [
+        {"technique_id": "T1566.001", "confidence": "high"},
+        {"technique_id": "T1110", "confidence": "medium"},
+        {"technique_id": "T9999", "confidence": "high"},
     ]
-    
-    print("\n--- Starting MITRE validation ---")
-    final_result = validate_and_enrich_ttps(mock_llm_output)
-    
-    import json
-    print("\n[+] Results after filtering noise and enriching data:")
-    print(json.dumps(final_result, indent=4, ensure_ascii=False))
+    print(json.dumps(validate_and_enrich_ttps(sample), indent=2, ensure_ascii=False))

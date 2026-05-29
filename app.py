@@ -1,202 +1,268 @@
-import streamlit as st
-import os
 import glob
-import pandas as pd
+import os
 import sqlite3
-import json
+
+import pandas as pd
+import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+import yaml
+
+from core.contextual import (
+    TECH_CATALOG,
+    canonicalize_technology_name,
+    get_discovery_live_mode,
+    get_discovery_provider,
+    get_discovery_timeout,
+    normalize_tech_stack,
+    passive_discover_technologies,
+    sleep_well_indicator,
+)
+from utils import db_handler
 
 st_autorefresh(interval=60000, limit=None, key="soc_dashboard_refresh")
 
-# ==============================================================================
-# PAGE CONFIGURATION
-# ==============================================================================
-st.set_page_config(
-    page_title="Adaptive CTI Dashboard",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Adaptive CTI Dashboard", page_icon="shield", layout="wide", initial_sidebar_state="expanded")
 
-# ==============================================================================
-# DIRECTORY PATHS
-# ==============================================================================
 BASE_DIR = os.path.dirname(__file__)
 REPORTS_DIR = os.path.join(BASE_DIR, "output", "reports")
 SIGMA_DIR = os.path.join(BASE_DIR, "output", "sigma_rules")
 DB_PATH = os.path.join(BASE_DIR, "data", "cti.db")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 
-# ==============================================================================
-# UTILITIES & DATABASE FUNCTIONS
-# ==============================================================================
+
+def load_dashboard_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+    except Exception:
+        return {}
+
+
+DASHBOARD_CONFIG = load_dashboard_config()
+DISCOVERY_CONFIG = DASHBOARD_CONFIG.get("tech_discovery", {})
+
+
 def read_file_content(filepath):
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading file: {e}"
+        with open(filepath, "r", encoding="utf-8") as handle:
+            return handle.read()
+    except Exception as exc:
+        return f"Error reading file: {exc}"
+
 
 def get_files_in_dir(directory, extension="*"):
     if not os.path.exists(directory):
         return []
     return sorted(glob.glob(os.path.join(directory, f"*.{extension}")))
 
-def fetch_live_metrics():
-    """Truy vấn Database thật để lấy số liệu thống kê cho Dashboard"""
+
+def open_connection():
     if not os.path.exists(DB_PATH):
-        return 0, 0, pd.DataFrame()
-        
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    try:
-        # 1. Đếm tổng số bài đã phân tích
-        cursor.execute("SELECT count(*) FROM intel_items WHERE processed=1")
-        total_processed = cursor.fetchone()[0]
-        
-        # 2. Đếm tổng số rule Sigma
-        cursor.execute("SELECT count(*) FROM sigma_rules")
-        total_sigma = cursor.fetchone()[0]
-        
-        # 3. Gom nhóm và đếm các mã MITRE ATT&CK đã phát hiện
-        cursor.execute("SELECT ttp_mapping FROM intel_items WHERE processed=1 AND ttp_mapping != '[]'")
-        rows = cursor.fetchall()
-        
-        technique_counts = {}
-        for row in rows:
-            try:
-                ttps = json.loads(row[0])
-                for ttp in ttps:
-                    tech_id = ttp.get("technique_id", "Unknown")
-                    tech_name = ttp.get("technique_name_official", "Unknown")
-                    label = f"{tech_id} - {tech_name}"
-                    technique_counts[label] = technique_counts.get(label, 0) + 1
-            except:
-                pass
-                
-        if technique_counts:
-            df_matrix = pd.DataFrame({
-                "MITRE Technique": list(technique_counts.keys()),
-                "Detection Count": list(technique_counts.values())
-            }).sort_values(by="Detection Count", ascending=False)
-        else:
-            df_matrix = pd.DataFrame({"MITRE Technique": ["No Threat Detected"], "Detection Count": [0]})
-            
-    except Exception as e:
-        st.error(f"Database Error: {e}")
-        total_processed, total_sigma, df_matrix = 0, 0, pd.DataFrame()
-    finally:
-        conn.close()
-        
-    return total_processed, total_sigma, df_matrix
+        return db_handler.init_db()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# ==============================================================================
-# MAIN INTERFACE
-# ==============================================================================
-st.title("🛡️ Adaptive Cyber Threat Intelligence (CTI)")
-st.markdown("*Automated semantic analysis, MITRE ATT&CK validation, and defense rule generation system.*")
 
-tab_overview, tab_reports, tab_sigma = st.tabs([
-    "📊 System Overview", 
-    "📄 3-Tier Reports", 
-    "🚨 Automated Defense (Sigma)"
-])
+def save_profile_form(conn):
+    profile = db_handler.get_active_profile(conn)
+    profile_stack = normalize_tech_stack(profile.get("tech_stack", {}))
+    st.subheader("Organization Profile")
+    col1, col2, col3 = st.columns(3)
+    org_name = col1.text_input("Organization", value=profile.get("org_name", ""))
+    industry = col2.text_input("Industry", value=profile.get("industry", ""))
+    preferred_language = col3.selectbox("Language", ["en", "vi"], index=0 if profile.get("preferred_language") != "vi" else 1)
+    public_domain = st.text_input("Public domain", value=profile.get("public_domain", ""), placeholder="example.com")
 
-# ------------------------------------------------------------------------------
-# TAB 1: OVERVIEW (LIVE DATABASE METRICS)
-# ------------------------------------------------------------------------------
-with tab_overview:
-    st.header("Pipeline Status (Live Production Data)")
-    
-    # Fetch real data from SQLite
-    total_processed, total_sigma, df_matrix = fetch_live_metrics()
-    
-    # Display Live KPIs
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label="Processed Threat Feeds", value=total_processed, delta="Synced to DB")
-    col2.metric(label="System Status", value="Active", delta="No Bottlenecks")
-    col3.metric(label="Unique MITRE Tactics", value=len(df_matrix) if total_processed > 0 else 0)
-    col4.metric(label="Generated Sigma Rules", value=total_sigma, delta="Ready for SIEM")
+    selected_stack = {}
+    for category, catalog in TECH_CATALOG.items():
+        default_values = [
+            value for value in profile_stack.get(category, [])
+            if value in catalog
+        ]
+        selected_stack[category] = st.multiselect(
+            category.replace("_", " ").title(),
+            catalog,
+            default=default_values,
+        )
 
-    st.divider()
-    
-    st.subheader("Live MITRE ATT&CK Detection Matrix")
-    if total_processed > 0:
-        st.dataframe(df_matrix, width="stretch", hide_index=True)
-    else:
-        st.info("No threats analyzed yet. Run the pipeline to populate this matrix.")
+    if st.button("Save Profile", type="primary"):
+        db_handler.save_org_profile(
+            conn,
+            {
+                "user_id": db_handler.DEFAULT_USER_ID,
+                "org_name": org_name,
+                "industry": industry,
+                "public_domain": public_domain,
+                "preferred_language": preferred_language,
+                "preferred_languages": [preferred_language, "en"] if preferred_language != "en" else ["en"],
+                "tech_stack": selected_stack,
+                "auto_discovered": profile.get("auto_discovered", []),
+            },
+        )
+        db_handler.clear_profile_matches(conn)
+        st.success("Profile saved. New threat matches will be recalculated on the next analysis run.")
 
-# ------------------------------------------------------------------------------
-# TAB 2: MULTI-TIER REPORTS
-# ------------------------------------------------------------------------------
-with tab_reports:
-    st.header("Multi-Audience Reporting System")
-    st.info("The system automatically uses AI (Qwen2.5) to compile raw data into 3 specialized reporting tiers.")
-    
-    report_files = get_files_in_dir(REPORTS_DIR, "md")
-    
-    if not report_files:
-        st.warning(f"No reports found in {REPORTS_DIR}. Please run the pipeline first.")
-    else:
-        report_groups = {}
-        for fpath in report_files:
-            fname = os.path.basename(fpath)
-            base_group = fname.replace("_01_executive.md", "").replace("_02_technical.md", "").replace("_03_operational.md", "")
-            if base_group not in report_groups:
-                report_groups[base_group] = {}
-            
-            if "executive" in fname:
-                report_groups[base_group]["CISO (Executive)"] = fpath
-            elif "technical" in fname:
-                report_groups[base_group]["SOC (Technical)"] = fpath
-            elif "operational" in fname:
-                report_groups[base_group]["Sysadmin (Operational)"] = fpath
+    st.caption("Auto-discovery uses passive fingerprinting with optional provider enrichment.")
+    if st.button("Auto-Discover Stack"):
+        st.session_state["discovered_stack"] = passive_discover_technologies(
+            public_domain,
+            timeout=get_discovery_timeout(DISCOVERY_CONFIG),
+            provider=get_discovery_provider(DISCOVERY_CONFIG),
+            prefer_live=get_discovery_live_mode(DISCOVERY_CONFIG),
+            builtwith_api_key=DASHBOARD_CONFIG.get("api_keys", {}).get("builtwith_api_key", ""),
+            wappalyzer_api_key=DASHBOARD_CONFIG.get("api_keys", {}).get("wappalyzer_api_key", ""),
+        )
 
-        selected_group = st.selectbox("Select Threat Event to view reports:", list(report_groups.keys()))
-        
-        if selected_group:
-            files_to_show = report_groups[selected_group]
-            r_col1, r_col2, r_col3 = st.columns(3)
-            
-            with r_col1:
-                st.subheader("🏢 For CISO (Executive)")
-                if "CISO (Executive)" in files_to_show:
-                    st.markdown(read_file_content(files_to_show["CISO (Executive)"]))
-                    
-            with r_col2:
-                st.subheader("🕵️ For SOC Analyst")
-                if "SOC (Technical)" in files_to_show:
-                    st.markdown(read_file_content(files_to_show["SOC (Technical)"]))
-                    
-            with r_col3:
-                st.subheader("🛠️ For Network Engineer")
-                if "Sysadmin (Operational)" in files_to_show:
-                    st.markdown(read_file_content(files_to_show["Sysadmin (Operational)"]))
-
-# ------------------------------------------------------------------------------
-# TAB 3: SIGMA DEFENSE RULES
-# ------------------------------------------------------------------------------
-with tab_sigma:
-    st.header("Auto-Generated Defense Rules (Sigma Engine)")
-    st.info("These rules are auto-populated with IOCs and TTPs by AI, ready for export to SIEMs (Splunk, Elastic).")
-    
-    sigma_files = get_files_in_dir(SIGMA_DIR, "yml")
-    
-    if not sigma_files:
-        st.warning(f"No Sigma rules found in {SIGMA_DIR}. Please run the pipeline first.")
-    else:
-        sigma_filenames = [os.path.basename(f) for f in sigma_files]
-        selected_sigma = st.selectbox("Select a Sigma Rule to view/download:", sigma_filenames)
-        
-        if selected_sigma:
-            full_path = os.path.join(SIGMA_DIR, selected_sigma)
-            yaml_content = read_file_content(full_path)
-            
-            st.code(yaml_content, language="yaml")
-            
-            st.download_button(
-                label="📥 Download .yml rule",
-                data=yaml_content,
-                file_name=selected_sigma,
-                mime="text/yaml"
+    discovered = st.session_state.get("discovered_stack", [])
+    if discovered:
+        discovered_names = [item["name"] for item in discovered]
+        st.dataframe(pd.DataFrame(discovered), width="stretch", hide_index=True)
+        if st.button("Confirm and Merge Discovery"):
+            merged_stack = normalize_tech_stack(profile.get("tech_stack", {}))
+            for item in discovered:
+                category = item["category"]
+                merged_stack.setdefault(category, [])
+                canonical_name = canonicalize_technology_name(item["name"])
+                if canonical_name in TECH_CATALOG.get(category, []) and canonical_name not in merged_stack[category]:
+                    merged_stack[category].append(canonical_name)
+            db_handler.save_org_profile(
+                conn,
+                {
+                    "user_id": db_handler.DEFAULT_USER_ID,
+                    "org_name": org_name,
+                    "industry": industry,
+                    "public_domain": public_domain,
+                    "preferred_language": preferred_language,
+                    "preferred_languages": [preferred_language, "en"] if preferred_language != "en" else ["en"],
+                    "tech_stack": merged_stack,
+                    "auto_discovered": discovered_names,
+                },
             )
+            st.session_state["discovered_stack"] = []
+            st.success("Discovered technologies merged into the saved profile.")
+
+
+def render_overview(conn):
+    alerts = db_handler.get_dashboard_alerts(conn)
+    indicator = sleep_well_indicator([alert for alert in alerts if alert.get("resolution_status") not in {"mitigated", "accepted_risk", "not_applicable"}])
+
+    st.header("Current Risk Posture")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Sleep-Well Indicator", indicator["color"].upper())
+    col2.metric("Indicator Detail", indicator["label"])
+    col3.metric("Open Matched Alerts", sum(1 for alert in alerts if alert.get("triage_status") != "closed"))
+    col4.metric("Mitigated Alerts", sum(1 for alert in alerts if alert.get("resolution_status") == "mitigated"))
+
+    heatmap_rows = db_handler.get_heatmap_data(conn)
+    st.subheader("Tech Stack Coverage Heatmap")
+    if heatmap_rows:
+        heatmap_df = pd.DataFrame(heatmap_rows)
+        pivot = heatmap_df.pivot_table(index="product_name", columns="severity", values="matches", fill_value=0)
+        st.dataframe(pivot, width="stretch")
+    else:
+        st.info("No matched tech stack vulnerabilities yet.")
+
+
+def render_feed(conn):
+    st.header("Real-Time Threat Feed")
+    col1, col2 = st.columns(2)
+    severity = col1.selectbox("Severity", ["all", "critical", "high", "medium", "low"])
+    source_type = col2.selectbox("Source Type", ["all", "rss", "Threat Feed", "reddit", "telegram"])
+    alerts = db_handler.get_dashboard_alerts(conn, severity=severity, source_type=source_type)
+
+    if not alerts:
+        st.info("No analyzed alerts match the current filters.")
+        return
+
+    for alert in alerts[:50]:
+        with st.container(border=True):
+            st.subheader(alert["title"] or alert["id"])
+            st.write(f"Severity: `{alert['severity']}` | Priority: `{alert['triage_priority']}` | Source: `{alert['source']}`")
+            st.write(f"Impacted assets: {', '.join(alert.get('impacted_assets', [])) or 'None matched'}")
+            summary = alert.get("notification_payload", {}).get("summary")
+            if summary and summary.strip().lower() != "error during analysis.":
+                st.write(summary)
+            if alert.get("url"):
+                st.markdown(f"[Source link]({alert['url']})")
+            if alert.get("mitigation_script"):
+                st.code(alert["mitigation_script"], language="bash")
+
+            status_col, note_col = st.columns([1, 2])
+            status = status_col.selectbox(
+                "Resolution",
+                ["open", "mitigated", "accepted_risk", "not_applicable"],
+                index=0,
+                key=f"status_{alert['id']}",
+            )
+            note = note_col.text_input("Note", key=f"note_{alert['id']}")
+            if st.button("Apply Status", key=f"apply_{alert['id']}"):
+                db_handler.set_remediation_status(conn, alert["id"], status=status, acted_by="streamlit_user", note=note)
+                st.success("Threat workflow updated.")
+
+
+def render_reports():
+    st.header("Reports")
+    report_files = get_files_in_dir(REPORTS_DIR, "md")
+    if not report_files:
+        st.warning(f"No reports found in {REPORTS_DIR}.")
+        return
+
+    report_groups = {}
+    for path in report_files:
+        filename = os.path.basename(path)
+        base_group = filename.replace("_01_executive.md", "").replace("_02_technical.md", "").replace("_03_operational.md", "")
+        report_groups.setdefault(base_group, {})
+        if "executive" in filename:
+            report_groups[base_group]["Executive"] = path
+        elif "technical" in filename:
+            report_groups[base_group]["Technical"] = path
+        elif "operational" in filename:
+            report_groups[base_group]["Operational"] = path
+
+    selected_group = st.selectbox("Threat Event", list(report_groups.keys()))
+    files_to_show = report_groups[selected_group]
+    for label in ["Executive", "Technical", "Operational"]:
+        if label in files_to_show:
+            st.subheader(label)
+            st.markdown(read_file_content(files_to_show[label]))
+
+
+def render_sigma():
+    st.header("Automated Defense Rules")
+    sigma_files = get_files_in_dir(SIGMA_DIR, "yml")
+    if not sigma_files:
+        st.warning(f"No Sigma rules found in {SIGMA_DIR}.")
+        return
+    selected_sigma = st.selectbox("Sigma Rule", [os.path.basename(path) for path in sigma_files])
+    full_path = os.path.join(SIGMA_DIR, selected_sigma)
+    yaml_content = read_file_content(full_path)
+    st.code(yaml_content, language="yaml")
+    st.download_button("Download rule", data=yaml_content, file_name=selected_sigma, mime="text/yaml")
+
+
+st.title("Adaptive Cyber Threat Intelligence")
+st.caption("Profile-driven CTI for SMEs: filter noise, escalate only relevant threats, track remediation.")
+
+conn = db_handler.init_db()
+
+tab_overview, tab_feed, tab_profile, tab_reports, tab_sigma = st.tabs(
+    ["Overview", "Threat Feed", "Organization Profile", "Reports", "Sigma"]
+)
+
+with tab_overview:
+    render_overview(conn)
+
+with tab_feed:
+    render_feed(conn)
+
+with tab_profile:
+    save_profile_form(conn)
+
+with tab_reports:
+    render_reports()
+
+with tab_sigma:
+    render_sigma()
+
+conn.close()
