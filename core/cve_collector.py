@@ -16,6 +16,7 @@ from typing import List, Dict
 
 import requests
 from dotenv import load_dotenv
+from utils import db_handler
 
 load_dotenv()
 
@@ -23,12 +24,45 @@ logger = logging.getLogger("cve_collector")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+KEV_STATE_KEY = "cisa_kev_last_sync"
+NVD_STATE_KEY = "nvd_last_mod_sync"
+
 
 def _md5_for_url(url: str) -> str:
     return hashlib.md5(url.encode("utf-8")).hexdigest()
 
 
-def fetch_cisa_kev(days_window: int = 3) -> List[Dict]:
+def _parse_state_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_feed_date(value: str) -> datetime | None:
+    if not value:
+        return None
+    value = value.strip()
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def fetch_cisa_kev(days_window: int = 3, db_conn=None) -> List[Dict]:
     """Fetch Known Exploited Vulnerabilities (CISA KEV) and map to schema.
 
     Returns list[dict] with `source_type` == "feed".
@@ -40,13 +74,21 @@ def fetch_cisa_kev(days_window: int = 3) -> List[Dict]:
         resp.raise_for_status()
         data = resp.json()
         vulns = data.get("vulnerabilities") or []
-        now = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        last_sync = db_handler.get_collector_state(db_conn, KEV_STATE_KEY) if db_conn else ""
+        last_sync_dt = _parse_state_datetime(last_sync)
         count = 0
         for v in vulns:
             try:
                 cve_id = v.get("cveID") or v.get("cve") or v.get("CVE")
                 if not cve_id:
                     continue
+
+                if last_sync_dt:
+                    feed_ts = _parse_feed_date(v.get("dateUpdated")) or _parse_feed_date(v.get("dateAdded"))
+                    if feed_ts and feed_ts <= last_sync_dt:
+                        continue
 
                 # Construct a CISA reference URL (constructed reference acceptable)
                 ref_url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog/{cve_id}"
@@ -88,6 +130,8 @@ def fetch_cisa_kev(days_window: int = 3) -> List[Dict]:
                 continue
 
         logger.info(f"Fetched {count} items from CISA KEV feed")
+        if db_conn:
+            db_handler.set_collector_state(db_conn, KEV_STATE_KEY, now_dt.isoformat())
     except Exception as e:
         logger.error(f"Failed to retrieve CISA KEV feed: {e}")
     return results
@@ -98,7 +142,7 @@ def _format_iso_for_nvd(dt: datetime) -> str:
     return dt.replace(microsecond=0, tzinfo=timezone.utc).isoformat(timespec='milliseconds') + "+00:00"
 
 
-def fetch_nvd_vulnerabilities(days_window: int = 3) -> List[Dict]:
+def fetch_nvd_vulnerabilities(days_window: int = 3, db_conn=None) -> List[Dict]:
     """Query NVD v2 API for CVEs published within the lookback window.
 
     Uses `pubStartDate` and `pubEndDate` to restrict results.
@@ -107,61 +151,74 @@ def fetch_nvd_vulnerabilities(days_window: int = 3) -> List[Dict]:
     base = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days_window)
-    params = {
-        "pubStartDate": _format_iso_for_nvd(start),
-        "pubEndDate": _format_iso_for_nvd(now),
-        # optionally reduce size per request; pagination not implemented here
-    }
+    last_sync = db_handler.get_collector_state(db_conn, NVD_STATE_KEY) if db_conn else ""
+    last_sync_dt = _parse_state_datetime(last_sync)
+    params = {"resultsPerPage": 2000, "startIndex": 0}
+    if last_sync_dt:
+        params["lastModStartDate"] = _format_iso_for_nvd(last_sync_dt)
+        params["lastModEndDate"] = _format_iso_for_nvd(now)
+    else:
+        params["pubStartDate"] = _format_iso_for_nvd(start)
+        params["pubEndDate"] = _format_iso_for_nvd(now)
     headers = {"User-Agent": "CTI-Adaptive-Pipeline/1.0"}
+    api_key = (os.getenv("NVD_API_KEY") or "").strip()
+    if api_key:
+        headers["apiKey"] = api_key
 
     try:
-        resp = requests.get(base, params=params, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        vulns = data.get("vulnerabilities") or []
         count = 0
-        for v in vulns:
-            try:
-                cve = v.get("cve") or {}
-                cve_id = cve.get("id")
-                if not cve_id:
+        total_results = None
+        while total_results is None or params["startIndex"] < total_results:
+            resp = requests.get(base, params=params, headers=headers, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            vulns = data.get("vulnerabilities") or []
+            total_results = int(data.get("totalResults", 0))
+            for v in vulns:
+                try:
+                    cve = v.get("cve") or {}
+                    cve_id = cve.get("id")
+                    if not cve_id:
+                        continue
+
+                    desc = ""
+                    for d in cve.get("descriptions", []) or []:
+                        if d.get("lang") == "en":
+                            desc = d.get("value", "")
+                            break
+                    if not desc and (cve.get("descriptions") or []):
+                        desc = cve.get("descriptions")[0].get("value", "")
+
+                    nvd_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+                    title = f"{cve_id}"
+                    content = desc or json.dumps(cve)
+
+                    item = {
+                        "id": _md5_for_url(nvd_url),
+                        "source": "NVD",
+                        "source_type": "feed",
+                        "title": title,
+                        "url": nvd_url,
+                        "content": content,
+                        "lang": "en",
+                        "confidence": 1.0,
+                        "processed": 0,
+                        "report_done": 0,
+                        "collected_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    results.append(item)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Error parsing NVD vulnerability entry: {e}")
                     continue
 
-                # Pick an English description if present
-                desc = ""
-                for d in cve.get("descriptions", []) or []:
-                    if d.get("lang") == "en":
-                        desc = d.get("value", "")
-                        break
-                if not desc:
-                    # fallback to first description
-                    if (cve.get("descriptions") or []):
-                        desc = (cve.get("descriptions")[0].get("value", ""))
+            params["startIndex"] += params["resultsPerPage"]
 
-                nvd_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
-                title = f"{cve_id}"
-                content = desc or json.dumps(cve)
-
-                item = {
-                    "id": _md5_for_url(nvd_url),
-                    "source": "NVD",
-                    "source_type": "feed",
-                    "title": title,
-                    "url": nvd_url,
-                    "content": content,
-                    "lang": "en",
-                    "confidence": 1.0,
-                    "processed": 0,
-                    "report_done": 0,
-                    "collected_at": datetime.now(timezone.utc).isoformat(),
-                }
-                results.append(item)
-                count += 1
-            except Exception as e:
-                logger.error(f"Error parsing NVD vulnerability entry: {e}")
-                continue
-
-        logger.info(f"Fetched {count} items from NVD between {params['pubStartDate']} and {params['pubEndDate']}")
+        window_start = params.get("lastModStartDate") or params.get("pubStartDate")
+        window_end = params.get("lastModEndDate") or params.get("pubEndDate")
+        logger.info(f"Fetched {count} items from NVD between {window_start} and {window_end}")
+        if db_conn:
+            db_handler.set_collector_state(db_conn, NVD_STATE_KEY, now.isoformat())
     except Exception as e:
         logger.error(f"Failed to query NVD API: {e}")
 
@@ -182,17 +239,17 @@ def fetch_alienvault_otx(days_window: int = 3) -> List[Dict]:
     return []
 
 
-def fetch_cve_feeds(days_window: int = 3) -> List[Dict]:
+def fetch_cve_feeds(days_window: int = 3, db_conn=None) -> List[Dict]:
     """Aggregate CISA KEV and NVD feeds and return a combined list.
     """
     results: List[Dict] = []
     try:
-        results.extend(fetch_cisa_kev(days_window=days_window))
+        results.extend(fetch_cisa_kev(days_window=days_window, db_conn=db_conn))
     except Exception as e:
         logger.error(f"CISA KEV collection failed: {e}")
 
     try:
-        results.extend(fetch_nvd_vulnerabilities(days_window=days_window))
+        results.extend(fetch_nvd_vulnerabilities(days_window=days_window, db_conn=db_conn))
     except Exception as e:
         logger.error(f"NVD collection failed: {e}")
 
@@ -211,14 +268,14 @@ if __name__ == "__main__":
     print(f"Fetched {len(items)} CVE items")
 
 
-def fetch_cve_data(days_window: int = 3) -> List[Dict]:
+def fetch_cve_data(days_window: int = 3, db_conn=None) -> List[Dict]:
     """Compatibility wrapper for legacy import name `fetch_cve_data` used by pipeline.
 
     Internally delegates to `fetch_cve_feeds` to keep the clearer function name
     while preserving backward compatibility with `pipeline.py`.
     """
     try:
-        return fetch_cve_feeds(days_window=days_window)
+        return fetch_cve_feeds(days_window=days_window, db_conn=db_conn)
     except Exception as e:
         logger.error(f"fetch_cve_data wrapper failed: {e}")
         return []

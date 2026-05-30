@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from core.contextual import TECH_CATALOG, normalize_tech_stack
+from core.contextual import TECH_CATALOG, match_profile_to_content, normalize_tech_stack
 
 DB_PATH = "data/cti.db"
 DEFAULT_USER_ID = "default"
@@ -110,6 +110,12 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     enabled        INTEGER DEFAULT 1,
     last_run_at    TEXT DEFAULT '',
     next_run_hint  TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS collector_state (
+    state_key   TEXT PRIMARY KEY,
+    state_value TEXT DEFAULT '',
+    updated_at  TEXT
 );
 """
 
@@ -216,9 +222,15 @@ def ensure_default_profile(conn: sqlite3.Connection, profile: Dict) -> None:
     save_org_profile(conn, profile)
 
 
-def save_org_profile(conn: sqlite3.Connection, profile: Dict) -> None:
+def save_org_profile(conn: sqlite3.Connection, profile: Dict) -> bool:
     normalized_stack = normalize_tech_stack(profile.get("tech_stack") or {})
     preferred_languages = profile.get("preferred_languages") or [profile.get("preferred_language", "en")]
+    user_id = profile.get("user_id", DEFAULT_USER_ID)
+    previous_row = conn.execute(
+        "SELECT tech_stack_json FROM user_profiles WHERE user_id=?",
+        (user_id,),
+    ).fetchone()
+    previous_stack = normalize_tech_stack(_json_load(previous_row["tech_stack_json"], {})) if previous_row else {}
     conn.execute(
         """
         INSERT INTO user_profiles (
@@ -237,7 +249,7 @@ def save_org_profile(conn: sqlite3.Connection, profile: Dict) -> None:
             updated_at=excluded.updated_at
         """,
         (
-            profile.get("user_id", DEFAULT_USER_ID),
+            user_id,
             profile.get("org_name", "Default Organization"),
             profile.get("industry", "unknown"),
             profile.get("public_domain", ""),
@@ -249,6 +261,10 @@ def save_org_profile(conn: sqlite3.Connection, profile: Dict) -> None:
         ),
     )
     conn.commit()
+    stack_changed = previous_stack != normalized_stack
+    if stack_changed:
+        rescan_profile_matches(conn, user_id=user_id)
+    return stack_changed
 
 
 def get_active_profile(conn: sqlite3.Connection, user_id: str = DEFAULT_USER_ID) -> Dict:
@@ -314,6 +330,66 @@ def record_profile_match(
     conn.commit()
 
 
+def rescan_profile_matches(conn: sqlite3.Connection, user_id: str = DEFAULT_USER_ID) -> int:
+    profile = get_active_profile(conn, user_id=user_id)
+    conn.execute("DELETE FROM tech_stack_vulnerabilities WHERE user_id=?", (user_id,))
+
+    rows = conn.execute(
+        """
+        SELECT id, source, source_type, title, content, severity, confidence, credibility_score
+        FROM intel_items
+        """
+    ).fetchall()
+
+    match_rows = []
+    impacted_updates = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    for row in rows:
+        item = dict(row)
+        text = f"{item.get('title', '')}\n{item.get('content', '')}"
+        matched_terms = match_profile_to_content(profile, text)
+        impacted_updates.append((_json_dump(sorted(set(matched_terms))), item["id"]))
+        if not matched_terms:
+            continue
+        confidence = float(item.get("credibility_score") or item.get("confidence") or 0.0)
+        is_zero_day = 1 if "kev" in (item.get("source") or "").lower() else 0
+        for term in sorted(set(matched_terms)):
+            match_rows.append(
+                (
+                    user_id,
+                    item["id"],
+                    term,
+                    term,
+                    item.get("source", ""),
+                    item.get("severity", "low"),
+                    1,
+                    is_zero_day,
+                    confidence,
+                    now,
+                )
+            )
+
+    if impacted_updates:
+        conn.executemany(
+            "UPDATE intel_items SET impacted_assets=? WHERE id=?",
+            impacted_updates,
+        )
+    if match_rows:
+        conn.executemany(
+            """
+            INSERT INTO tech_stack_vulnerabilities (
+                user_id, intel_id, product_name, matched_term, source, severity,
+                is_relevant, is_zero_day, confidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            match_rows,
+        )
+    conn.commit()
+    logger.info("Rescanned %s intel items against profile. Found %s tech stack matches.", len(rows), len(match_rows))
+    return len(match_rows)
+
+
 def save_item(conn: sqlite3.Connection, item: Dict) -> bool:
     return save_items_batch(conn, [item]) > 0
 
@@ -350,6 +426,63 @@ def save_items_batch(conn: sqlite3.Connection, items: List[Dict]) -> int:
         return inserted_count
     except Exception as exc:
         logger.error("Error in save_items_batch: %s", exc)
+        return 0
+
+
+def upsert_items_batch(conn: sqlite3.Connection, items: List[Dict]) -> int:
+    if not items:
+        return 0
+    query = """
+        INSERT INTO intel_items
+        (id, source, source_type, title, url, content, lang, confidence, collected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            source=excluded.source,
+            source_type=excluded.source_type,
+            title=excluded.title,
+            url=excluded.url,
+            content=excluded.content,
+            lang=excluded.lang,
+            confidence=excluded.confidence,
+            collected_at=excluded.collected_at,
+            processed=0,
+            analyzed=0,
+            report_done=0,
+            credibility_score=0.0,
+            relevance_score=0.0,
+            triage_status='new',
+            triage_priority='routine',
+            impacted_assets='[]',
+            mitigation_script='',
+            notification_payload='',
+            watch_until='',
+            executive_summary_en='',
+            executive_summary_vi=''
+    """
+    data_tuples = [
+        (
+            item["id"],
+            item["source"],
+            item["source_type"],
+            item.get("title"),
+            item.get("url"),
+            item.get("content"),
+            item.get("lang", "en"),
+            item.get("confidence", 0.0),
+            item.get("collected_at", datetime.now(timezone.utc).isoformat()),
+        )
+        for item in items
+    ]
+    try:
+        before = conn.total_changes
+        conn.executemany(query, data_tuples)
+        conn.commit()
+        changed_count = conn.total_changes - before
+        logger.info("Feed upsert completed. Inserted/updated %s records.", changed_count)
+        rescan_profile_matches(conn)
+        return changed_count
+    except Exception as exc:
+        logger.error("Error in upsert_items_batch: %s", exc)
         return 0
 
 
@@ -552,6 +685,28 @@ def set_remediation_status(
 def get_scheduler_jobs(conn: sqlite3.Connection) -> List[Dict]:
     rows = conn.execute("SELECT * FROM scheduled_jobs ORDER BY interval_hours ASC").fetchall()
     return [dict(row) for row in rows]
+
+
+def get_collector_state(conn: sqlite3.Connection, state_key: str, default: str = "") -> str:
+    row = conn.execute(
+        "SELECT state_value FROM collector_state WHERE state_key=?",
+        (state_key,),
+    ).fetchone()
+    return row["state_value"] if row and row["state_value"] is not None else default
+
+
+def set_collector_state(conn: sqlite3.Connection, state_key: str, state_value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO collector_state (state_key, state_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(state_key) DO UPDATE SET
+            state_value=excluded.state_value,
+            updated_at=excluded.updated_at
+        """,
+        (state_key, state_value, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
 
 
 def touch_scheduler_job(conn: sqlite3.Connection, job_name: str, next_run_hint: str = "") -> None:

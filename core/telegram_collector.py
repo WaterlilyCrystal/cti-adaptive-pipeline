@@ -22,6 +22,10 @@ CHANNELS = [
     "intel471",           # Intelligence discussions
     "thecyberexpress",    # Cyber news
     "breachesandleaks",   # Data breach tracking
+    "cveNotify",          # High-volume CVE alerts
+    "malwr",              # Malware research and writeups
+    "arpsyndicate",       # Vulnerability and exploit intelligence
+    "exploitorg",         # Exploit and detection engineering research
     
     # === Russian ===
     "breakersgen",        # Russian hacker forum discussions

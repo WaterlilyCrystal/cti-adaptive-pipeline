@@ -269,13 +269,22 @@ def generate_text(
     max_tokens: int = 1024,
     cfg: Dict | None = None,
     request_label: str = "request",
+    trigger_cooldown: bool = True,
+    num_ctx_override: int | None = None,
+    timeout_override: int | None = None,
 ) -> str:
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
     headers = {"Content-Type": "application/json"}
-    timeout = _label_timeout(cfg, request_label, _request_timeout(cfg))
+    timeout = max(5, int(timeout_override)) if timeout_override is not None else _label_timeout(cfg, request_label, _request_timeout(cfg))
     max_retries = _max_retries(cfg)
     model_name = _selected_model or get_model_name(cfg)
+    num_ctx = _num_ctx(cfg)
+    if num_ctx_override is not None:
+        try:
+            num_ctx = max(512, min(int(num_ctx_override), num_ctx))
+        except (TypeError, ValueError):
+            num_ctx = _num_ctx(cfg)
     payload = {
         "model": model_name,
         "prompt": prompt,
@@ -283,7 +292,7 @@ def generate_text(
         "stream": False,
         "options": {
             "temperature": temperature,
-            "num_ctx": _num_ctx(cfg),
+            "num_ctx": num_ctx,
             "num_predict": max_tokens,
         },
     }
@@ -313,7 +322,8 @@ def generate_text(
                 time.sleep(wait_time)
                 continue
             message = _format_runtime_hint(detail)
-            _set_cooldown(cfg, f"{request_label} failed with HTTP {status_code}: {detail}")
+            if trigger_cooldown:
+                _set_cooldown(cfg, f"{request_label} failed with HTTP {status_code}: {detail}")
             raise OllamaServiceError(f"Ollama HTTP {status_code} during {request_label}. {message}") from exc
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             if attempt < max_retries - 1:
@@ -327,13 +337,16 @@ def generate_text(
                 )
                 time.sleep(wait_time)
                 continue
-            _set_cooldown(cfg, f"{request_label} transport failure: {exc}")
+            if trigger_cooldown:
+                _set_cooldown(cfg, f"{request_label} transport failure: {exc}")
             raise OllamaServiceError(f"Ollama transport failure during {request_label}") from exc
         except requests.RequestException as exc:
-            _set_cooldown(cfg, f"{request_label} request failure: {exc}")
+            if trigger_cooldown:
+                _set_cooldown(cfg, f"{request_label} request failure: {exc}")
             raise OllamaServiceError(f"Ollama request failure during {request_label}") from exc
         except ValueError as exc:
-            _set_cooldown(cfg, f"{request_label} invalid JSON response: {exc}")
+            if trigger_cooldown:
+                _set_cooldown(cfg, f"{request_label} invalid JSON response: {exc}")
             raise OllamaServiceError(f"Ollama invalid JSON during {request_label}") from exc
 
     raise OllamaServiceError(f"Ollama failed during {request_label}")

@@ -45,7 +45,14 @@ DISCOVERY_CONFIG = DASHBOARD_CONFIG.get("tech_discovery", {})
 def read_file_content(filepath):
     try:
         with open(filepath, "r", encoding="utf-8") as handle:
-            return handle.read()
+            content = handle.read()
+            lowered = content.strip().lower()
+            if lowered.startswith("llm generation error:") or lowered.startswith("500 server error:") or lowered.startswith("traceback"):
+                return (
+                    "Report generation previously failed for this item.\n\n"
+                    "The stored report file contained a runtime error instead of valid Markdown content."
+                )
+            return content
     except Exception as exc:
         return f"Error reading file: {exc}"
 
@@ -87,7 +94,7 @@ def save_profile_form(conn):
         )
 
     if st.button("Save Profile", type="primary"):
-        db_handler.save_org_profile(
+        stack_changed = db_handler.save_org_profile(
             conn,
             {
                 "user_id": db_handler.DEFAULT_USER_ID,
@@ -100,8 +107,10 @@ def save_profile_form(conn):
                 "auto_discovered": profile.get("auto_discovered", []),
             },
         )
-        db_handler.clear_profile_matches(conn)
-        st.success("Profile saved. New threat matches will be recalculated on the next analysis run.")
+        if stack_changed:
+            st.success("Profile saved. Existing CVE/feed items were rescanned against the updated tech stack.")
+        else:
+            st.success("Profile saved. Tech stack did not change.")
 
     st.caption("Auto-discovery uses passive fingerprinting with optional provider enrichment.")
     if st.button("Auto-Discover Stack"):
@@ -140,7 +149,7 @@ def save_profile_form(conn):
                 },
             )
             st.session_state["discovered_stack"] = []
-            st.success("Discovered technologies merged into the saved profile.")
+            st.success("Discovered technologies merged and existing CVE/feed items rescanned.")
 
 
 def render_overview(conn):

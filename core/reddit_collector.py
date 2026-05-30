@@ -13,6 +13,7 @@ SUBREDDITS = [
     # === English ===
     "netsec", "blueteamsec", "threatintel", "malware", "ExploitDev", 
     "cybersecurity", "InfoSecNews", "APT", "reverseengineering", "PrivacyGuides",
+    "MalwareAnalysis", "redteamsec", "AskNetsec", "computerforensics", "bugbounty",
     # === Chinese (Simplified & Traditional) ===
     "chinatech", "China_SW", "HongKong", "Taiwan",  # Regional tech communities
     "SecurityCommunity_CN",  # Chinese security
