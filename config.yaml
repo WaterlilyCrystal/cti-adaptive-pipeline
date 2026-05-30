@@ -1,4 +1,4 @@
-# ── LLM ──────────────────────────────────────────────────
+# LLM configuration
 llm:
   runtime: ollama
   model: qwen2.5:3b-instruct-q4_K_M
@@ -26,7 +26,7 @@ resources:
   available_ram_gb_override: 0
   reserve_ram_gb: 2
 
-# ── Org Profile ──────────────────────────────────────────
+# Organization profile
 org_profile:
   name: "Demo Org"
   industry: finance
@@ -45,49 +45,49 @@ tech_discovery:
   timeout: 10
   live: false
 
-# ── Sources ──────────────────────────────────────────────
+# Data sources
 sources:
-  # RSS: Leave empty to use all 30+ multilingual sources from rss_collector.py SOURCES dict
-  # Includes: English (CISA, MS, Google, Krebs), Russian (Xakep, Securelist), 
-  # Chinese (FreeBuf, Seebug, Anquanke, Tencent), European (CERT-FR, CERT-Bund, etc.)
+  # Leave RSS empty to use the default source catalog from rss_collector.py.
   rss: []
   reddit:
-    # Multilingual subreddits (English, Chinese communities)
-    subreddits: [netsec, blueteamsec, threatintel, malware, ExploitDev, cybersecurity, chinatech]
+    # Public communities monitored by the Reddit RSS collector
+    subreddits: [netsec, blueteamsec, threatintel, malware, ExploitDev, cybersecurity, InfoSecNews, reverseengineering, MalwareAnalysis, redteamsec, AskNetsec, computerforensics, bugbounty, chinatech]
     limit: 25
   telegram:
-    # Multilingual channels (English, Russian, Chinese)
+    # Public Telegram channels monitored by the Telegram collector
     channels: [
-      vxunderground,        # English - largest malware/APT channel
-      CyberKnow,            # English - cyber knowledge
-      intel471,             # English - intelligence discussions
-      thecyberexpress,      # English - cyber news
-      breachesandleaks,     # English - data breach tracking
-      breakersgen,          # Russian - hacker discussions
-      feixuyun,             # Chinese - security research
-      malwaresec            # Multilingual - malware analysis
+      vxunderground,        # Malware and intrusion reporting
+      CyberKnow,            # Security knowledge sharing
+      intel471,             # Threat intelligence discussion
+      thecyberexpress,      # Security news
+      breachesandleaks,     # Public breach tracking
+      cveNotify,            # CVE alert stream
+      malwr,                # Malware research and writeups
+      arpsyndicate,         # Vulnerability and exploit discussion
+      exploitorg,           # Exploit research
+      breakersgen,          # Russian-language security discussion
+      feixuyun,             # Chinese security research
+      malwaresec            # Multilingual malware analysis
     ]
   cve:
-    nvd_days_back: 3      # Lấy CVE mới trong 3 ngày gần nhất
-    cisa_kev: true        # Luôn bật — CVE đang bị exploit thực tế
+    nvd_days_back: 3      # Initial lookback window for new CVE collection
+    cisa_kev: true        # Include the CISA Known Exploited Vulnerabilities catalog
 
-# ── Pipeline ─────────────────────────────────────────────
+# Pipeline settings
 pipeline:
-  dedup_threshold: 0.90   # Cosine similarity — trên ngưỡng này = duplicate
-  min_confidence: 0.50    # Bỏ qua item dưới ngưỡng này
-  max_content_chars: 5000 # Cắt content trước khi đưa vào LLM
-  ram_threshold_pct: 85   # Auto-pause khi RAM vượt ngưỡng này
-  phase3_max_items: 5     # Max items per Phase 3 run. Recommend 5-10 to prevent LLM overload (was 0=unlimited which caused the issue!)
+  dedup_threshold: 0.90   # Cosine similarity threshold for semantic de-duplication
+  min_confidence: 0.50    # Minimum score required to keep an item for analysis
+  max_content_chars: 5000 # Maximum content length forwarded to the LLM layer
+  ram_threshold_pct: 85   # Pause memory-intensive operations above this threshold
+  phase3_max_items: 5     # Maximum items analyzed in one Phase 3 run
   phase3_stop_after_consecutive_llm_failures: 1
-  
-  # === RAM OPTIMIZATION SETTINGS ===
-  # ⚠️  IMPORTANT: Semantic dedup is VERY SLOW with >1000 items
-  # For large datasets (1000+ items), keep it DISABLED unless you have time
-  enable_semantic_dedup: false       # Set to false for 10-20x faster processing (URL + hash = 90% effective)
-  dedup_window_size: 50              # Only used if semantic_dedup is enabled
-  batch_processing_size: 500         # Process N items at a time (smaller = less RAM, more DB queries)
 
-# ── API Keys (để trống ở đây, điền vào .env) ────────────
+  # Memory-aware processing controls
+  enable_semantic_dedup: false       # Faster processing path when resource limits are tight
+  dedup_window_size: 50              # Only used when semantic de-duplication is enabled
+  batch_processing_size: 500         # Smaller batches reduce RAM pressure but increase DB queries
+
+# API keys (populate via .env in normal use)
 api_keys:
   reddit_client_id: ""
   reddit_client_secret: ""

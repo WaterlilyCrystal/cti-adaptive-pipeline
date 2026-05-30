@@ -42,10 +42,321 @@ DASHBOARD_CONFIG = load_dashboard_config()
 DISCOVERY_CONFIG = DASHBOARD_CONFIG.get("tech_discovery", {})
 
 
+def inject_showcase_styles():
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .showcase-shell {
+            background:
+                radial-gradient(circle at top left, rgba(255,91,114,0.12), transparent 24%),
+                radial-gradient(circle at top right, rgba(71,189,255,0.14), transparent 28%),
+                linear-gradient(145deg, #081321 0%, #0b1628 40%, #132338 100%);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 24px;
+            padding: 26px 28px;
+            box-shadow: 0 26px 60px rgba(2, 8, 23, 0.35);
+            margin-bottom: 18px;
+        }
+
+        .showcase-hero {
+            display: grid;
+            grid-template-columns: 1.55fr 0.85fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .showcase-card {
+            border-radius: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            background: linear-gradient(180deg, rgba(15,23,42,0.76), rgba(20,34,56,0.72));
+            padding: 22px;
+        }
+
+        .showcase-eyebrow {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(255, 91, 114, 0.15);
+            color: #ffd6de;
+            border: 1px solid rgba(255, 91, 114, 0.25);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.7px;
+            text-transform: uppercase;
+            margin-bottom: 14px;
+        }
+
+        .showcase-title {
+            color: #f8fbff;
+            font-size: 38px;
+            line-height: 1.04;
+            font-weight: 700;
+            margin: 0 0 12px 0;
+        }
+
+        .showcase-copy {
+            color: #98adcb;
+            font-size: 16px;
+            line-height: 1.6;
+        }
+
+        .showcase-alert {
+            background: linear-gradient(180deg, rgba(82, 17, 30, 0.88), rgba(51, 12, 21, 0.9));
+            border: 1px solid rgba(255,91,114,0.22);
+        }
+
+        .showcase-alert-k {
+            color: #ffc7d2;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+        }
+
+        .showcase-alert-v {
+            color: white;
+            font-size: 70px;
+            line-height: 1;
+            font-weight: 700;
+            margin: 10px 0 12px 0;
+        }
+
+        .showcase-alert-p {
+            color: #ffd7de;
+            font-size: 15px;
+            line-height: 1.55;
+        }
+
+        .showcase-banner {
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 16px;
+            align-items: center;
+            margin-bottom: 16px;
+            border-radius: 18px;
+            border: 1px solid rgba(255,91,114,0.26);
+            background: linear-gradient(90deg, rgba(127,29,29,0.95), rgba(91,22,36,0.92) 38%, rgba(54,16,27,0.92) 100%);
+            padding: 16px 18px;
+            box-shadow: 0 16px 36px rgba(69, 10, 10, 0.28);
+        }
+
+        .showcase-banner-left {
+            color: white;
+            font-size: 28px;
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .showcase-banner-right {
+            color: #ffe1e7;
+            font-size: 15px;
+            line-height: 1.5;
+        }
+
+        .showcase-metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .showcase-metric {
+            border-radius: 18px;
+            border: 1px solid rgba(148,163,184,0.12);
+            background: rgba(15,23,42,0.62);
+            padding: 16px 18px;
+        }
+
+        .showcase-metric-k {
+            color: #8fa6c7;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.7px;
+        }
+
+        .showcase-metric-v {
+            color: #f8fbff;
+            font-size: 32px;
+            line-height: 1.1;
+            font-weight: 700;
+            margin-top: 6px;
+        }
+
+        .showcase-metric-p {
+            color: #7dd3fc;
+            font-size: 13px;
+            margin-top: 7px;
+        }
+
+        .showcase-grid {
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr 0.9fr;
+            gap: 16px;
+        }
+
+        .showcase-panel-title {
+            color: #f8fbff;
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 14px;
+        }
+
+        .showcase-panel-note {
+            color: #8fa6c7;
+            font-size: 12px;
+            line-height: 1.45;
+            margin-bottom: 12px;
+        }
+
+        .heatmap-wrap {
+            display: grid;
+            gap: 10px;
+        }
+
+        .heatmap-head, .heatmap-row {
+            display: grid;
+            grid-template-columns: 1.3fr repeat(4, 0.75fr);
+            gap: 8px;
+            align-items: center;
+        }
+
+        .heatmap-head div {
+            color: #8fa6c7;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.7px;
+        }
+
+        .heatmap-label {
+            color: #e6eefb;
+            font-size: 14px;
+            white-space: nowrap;
+        }
+
+        .heatbox {
+            min-width: 48px;
+            text-align: center;
+            padding: 10px 0;
+            border-radius: 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+        }
+
+        .heat-low {
+            background: rgba(71, 189, 255, 0.10);
+            color: #c8f2ff;
+        }
+
+        .heat-med {
+            background: rgba(255, 193, 94, 0.14);
+            color: #ffe4af;
+        }
+
+        .heat-high {
+            background: rgba(255, 91, 114, 0.18);
+            color: #ffd2db;
+        }
+
+        .feature-item {
+            border-radius: 15px;
+            padding: 14px;
+            margin-bottom: 12px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(148,163,184,0.12);
+        }
+
+        .feature-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .feature-k {
+            color: #8fa6c7;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.7px;
+            margin-bottom: 6px;
+        }
+
+        .feature-v {
+            color: #ffffff;
+            font-size: 17px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .feature-p {
+            color: #cedbeb;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .flow-step {
+            display: grid;
+            grid-template-columns: 36px 1fr;
+            gap: 12px;
+            align-items: start;
+            margin-bottom: 12px;
+        }
+
+        .flow-step:last-child {
+            margin-bottom: 0;
+        }
+
+        .flow-num {
+            width: 32px;
+            height: 32px;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(71,189,255,0.14);
+            border: 1px solid rgba(71,189,255,0.22);
+            color: #d8f6ff;
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 700;
+        }
+
+        .flow-title {
+            color: white;
+            font-size: 15px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .flow-copy {
+            color: #cedbeb;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        @media (max-width: 1100px) {
+            .showcase-hero, .showcase-metrics, .showcase-grid {
+                grid-template-columns: 1fr !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def read_file_content(filepath):
     try:
         with open(filepath, "r", encoding="utf-8") as handle:
-            return handle.read()
+            content = handle.read()
+            lowered = content.strip().lower()
+            if lowered.startswith("llm generation error:") or lowered.startswith("500 server error:") or lowered.startswith("traceback"):
+                return (
+                    "Report generation previously failed for this item.\n\n"
+                    "The stored report file contained a runtime error instead of valid Markdown content."
+                )
+            return content
     except Exception as exc:
         return f"Error reading file: {exc}"
 
@@ -87,7 +398,7 @@ def save_profile_form(conn):
         )
 
     if st.button("Save Profile", type="primary"):
-        db_handler.save_org_profile(
+        stack_changed = db_handler.save_org_profile(
             conn,
             {
                 "user_id": db_handler.DEFAULT_USER_ID,
@@ -100,8 +411,10 @@ def save_profile_form(conn):
                 "auto_discovered": profile.get("auto_discovered", []),
             },
         )
-        db_handler.clear_profile_matches(conn)
-        st.success("Profile saved. New threat matches will be recalculated on the next analysis run.")
+        if stack_changed:
+            st.success("Profile saved. Existing CVE/feed items were rescanned against the updated tech stack.")
+        else:
+            st.success("Profile saved. Tech stack did not change.")
 
     st.caption("Auto-discovery uses passive fingerprinting with optional provider enrichment.")
     if st.button("Auto-Discover Stack"):
@@ -140,28 +453,161 @@ def save_profile_form(conn):
                 },
             )
             st.session_state["discovered_stack"] = []
-            st.success("Discovered technologies merged into the saved profile.")
+            st.success("Discovered technologies merged and existing CVE/feed items rescanned.")
 
 
 def render_overview(conn):
     alerts = db_handler.get_dashboard_alerts(conn)
     indicator = sleep_well_indicator([alert for alert in alerts if alert.get("resolution_status") not in {"mitigated", "accepted_risk", "not_applicable"}])
-
-    st.header("Current Risk Posture")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Sleep-Well Indicator", indicator["color"].upper())
-    col2.metric("Indicator Detail", indicator["label"])
-    col3.metric("Open Matched Alerts", sum(1 for alert in alerts if alert.get("triage_status") != "closed"))
-    col4.metric("Mitigated Alerts", sum(1 for alert in alerts if alert.get("resolution_status") == "mitigated"))
-
+    open_alerts = [alert for alert in alerts if alert.get("triage_status") != "closed"]
+    critical_open = sum(1 for alert in open_alerts if alert.get("severity") == "critical")
+    high_open = sum(1 for alert in open_alerts if alert.get("severity") == "high")
+    mitigated = sum(1 for alert in alerts if alert.get("resolution_status") == "mitigated")
     heatmap_rows = db_handler.get_heatmap_data(conn)
-    st.subheader("Tech Stack Coverage Heatmap")
+    heatmap_note = "Counts are derived from current matched-alert records in the database."
     if heatmap_rows:
-        heatmap_df = pd.DataFrame(heatmap_rows)
-        pivot = heatmap_df.pivot_table(index="product_name", columns="severity", values="matches", fill_value=0)
-        st.dataframe(pivot, width="stretch")
+        grouped = {}
+        for row in heatmap_rows:
+            name = row["product_name"]
+            grouped.setdefault(name, {"critical": 0, "high": 0, "medium": 0, "low": 0})
+            grouped[name][str(row["severity"]).lower()] = int(row["matches"] or 0)
+        heatmap_view = [{"asset": name, **values} for name, values in list(grouped.items())[:6]]
     else:
-        st.info("No matched tech stack vulnerabilities yet.")
+        heatmap_note = (
+            "No matched-alert heatmap data is available yet. The panel below uses illustrative placeholder values "
+            "for presentation only and should not be interpreted as measured system output."
+        )
+        heatmap_view = [
+            {"asset": "AWS", "critical": 1, "high": 1, "medium": 0, "low": 1},
+            {"asset": "Nginx", "critical": 1, "high": 2, "medium": 1, "low": 0},
+            {"asset": "NodeJS", "critical": 0, "high": 2, "medium": 1, "low": 0},
+            {"asset": "React", "critical": 0, "high": 1, "medium": 1, "low": 0},
+            {"asset": "Redis", "critical": 0, "high": 1, "medium": 0, "low": 1},
+            {"asset": "Windows Server", "critical": 1, "high": 2, "medium": 0, "low": 0},
+        ]
+
+    heatmap_html = """
+    <div class="heatmap-wrap">
+      <div class="heatmap-head">
+        <div>Asset</div><div>Critical</div><div>High</div><div>Medium</div><div>Low</div>
+      </div>
+    """
+    for row in heatmap_view:
+        def heat_class(value):
+            if value >= 2:
+                return "heat-high"
+            if value == 1:
+                return "heat-med"
+            return "heat-low"
+
+        heatmap_html += f"""
+        <div class="heatmap-row">
+          <div class="heatmap-label">{row['asset']}</div>
+          <div class="heatbox {heat_class(row['critical'])}">{row['critical']}</div>
+          <div class="heatbox {heat_class(row['high'])}">{row['high']}</div>
+          <div class="heatbox {heat_class(row['medium'])}">{row['medium']}</div>
+          <div class="heatbox {heat_class(row['low'])}">{row['low']}</div>
+        </div>
+        """
+    heatmap_html += "</div>"
+
+    html = f"""
+    <div class="showcase-shell">
+      <div class="showcase-hero">
+        <div class="showcase-card">
+          <div class="showcase-eyebrow">Operational CTI Overview</div>
+          <div class="showcase-title">Current Risk Posture</div>
+          <div class="showcase-copy">
+            Cross-source collection, profile-aware matching, IOC extraction, and analyst-oriented reporting
+            are consolidated here into one review surface for triage and defensive follow-up.
+          </div>
+        </div>
+        <div class="showcase-card showcase-alert">
+          <div class="showcase-alert-k">Critical Cases</div>
+          <div class="showcase-alert-v">{critical_open}</div>
+          <div class="showcase-alert-p">
+            Immediate review required for unresolved critical items across the current threat queue.
+          </div>
+        </div>
+      </div>
+
+      <div class="showcase-banner">
+        <div class="showcase-banner-left">Immediate attention</div>
+        <div class="showcase-banner-right">
+          Review the highest-priority items, validate asset exposure, confirm exploitability conditions, and prepare mitigation or containment actions where evidence supports intervention.
+        </div>
+      </div>
+
+      <div class="showcase-metrics">
+        <div class="showcase-metric">
+          <div class="showcase-metric-k">Sleep-Well Indicator</div>
+          <div class="showcase-metric-v">{indicator['color'].upper()}</div>
+          <div class="showcase-metric-p">{indicator['label']}</div>
+        </div>
+        <div class="showcase-metric">
+          <div class="showcase-metric-k">Open Matched Alerts</div>
+          <div class="showcase-metric-v">{len(open_alerts)}</div>
+          <div class="showcase-metric-p">Threats relevant to defended assets</div>
+        </div>
+        <div class="showcase-metric">
+          <div class="showcase-metric-k">High Severity</div>
+          <div class="showcase-metric-v">{high_open}</div>
+          <div class="showcase-metric-p">Escalation backlog under review</div>
+        </div>
+        <div class="showcase-metric">
+          <div class="showcase-metric-k">Mitigated Alerts</div>
+          <div class="showcase-metric-v">{mitigated}</div>
+          <div class="showcase-metric-p">Closed with remediation action</div>
+        </div>
+      </div>
+
+      <div class="showcase-grid">
+        <div class="showcase-card">
+          <div class="showcase-panel-title">Tech Stack Exposure Heatmap</div>
+          <div class="showcase-panel-note">{heatmap_note}</div>
+          {heatmap_html}
+        </div>
+        <div class="showcase-card">
+          <div class="showcase-panel-title">System Capabilities</div>
+          <div class="feature-item">
+            <div class="feature-k">Cross-Source Collection</div>
+            <div class="feature-v">RSS, Reddit, Telegram, CVE, KEV, OTX</div>
+            <div class="feature-p">The pipeline merges structured and unstructured public intelligence into one normalized workflow.</div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-k">IOC and TTP Extraction</div>
+            <div class="feature-v">Regex plus LLM-assisted CTI analysis</div>
+            <div class="feature-p">Extracts CVEs, IPs, domains, attack vectors, and ATT&amp;CK context for triage.</div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-k">Profile-Aware Prioritization</div>
+            <div class="feature-v">Environment-relevant threat matching</div>
+            <div class="feature-p">Signals are rescored based on the organization's actual stack rather than generic threat volume alone.</div>
+          </div>
+        </div>
+        <div class="showcase-card">
+          <div class="showcase-panel-title">Pipeline Flow</div>
+          <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div><div class="flow-title">Collect</div><div class="flow-copy">Sources ingest public social chatter, feeds, and vulnerability intelligence.</div></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div><div class="flow-title">Filter</div><div class="flow-copy">Noise is normalized, deduplicated, and scored before costly downstream analysis.</div></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div><div class="flow-title">Analyze</div><div class="flow-copy">LLM reasoning and ATT&amp;CK mapping convert raw text into analyst-usable CTI.</div></div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div><div class="flow-title">Report</div><div class="flow-copy">Executive, technical, and operational outputs support remediation and review.</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_feed(conn):
@@ -241,6 +687,7 @@ def render_sigma():
     st.download_button("Download rule", data=yaml_content, file_name=selected_sigma, mime="text/yaml")
 
 
+inject_showcase_styles()
 st.title("Adaptive Cyber Threat Intelligence")
 st.caption("Profile-driven CTI for SMEs: filter noise, escalate only relevant threats, track remediation.")
 

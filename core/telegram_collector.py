@@ -14,19 +14,23 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Target public cybersecurity channels (multilingual: English, Russian, Chinese)
+# Selected public cybersecurity channels (multilingual: English, Russian, Chinese)
 CHANNELS = [
     # === English ===
-    "vxunderground",      # Largest English malware/APT channel
-    "CyberKnow",          # Cyber knowledge sharing
-    "intel471",           # Intelligence discussions
-    "thecyberexpress",    # Cyber news
-    "breachesandleaks",   # Data breach tracking
+    "vxunderground",      # Malware and intrusion reporting
+    "CyberKnow",          # Security knowledge sharing
+    "intel471",           # Threat intelligence discussion
+    "thecyberexpress",    # Security news
+    "breachesandleaks",   # Public breach tracking
+    "cveNotify",          # CVE alert stream
+    "malwr",              # Malware research and writeups
+    "arpsyndicate",       # Vulnerability and exploit discussion
+    "exploitorg",         # Exploit and detection engineering research
     
     # === Russian ===
-    "breakersgen",        # Russian hacker forum discussions
+    "breakersgen",        # Russian-language security discussion
     "exploitdb_news",     # Exploit database updates
-    "cybersecurity_russia", # Russian security community
+    "cybersecurity_russia", # Russian-language security community
     
     # === Chinese ===
     "feixuyun",           # Chinese security research

@@ -22,7 +22,7 @@ from core.rss_collector import fetch_rss_from_config
 from core.telegram_collector import fetch_telegram_data
 from utils.monitor import apply_runtime_profile
 from utils import db_handler
-from utils.db_handler import init_db, save_items_batch
+from utils.db_handler import init_db, save_items_batch, upsert_items_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -68,11 +68,12 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
 
     tiers = tiers or {"social", "news", "vuln"}
     all_collected_items = []
+    vuln_collected_items = []
 
     if "social" in tiers:
         for collector_name, collector in [
-            ("Reddit", lambda: fetch_reddit_rss_feed(days_window=2 / 24)),
-            ("Telegram", lambda: fetch_telegram_data(days_window=2 / 24)),
+            ("Reddit", lambda: fetch_reddit_rss_feed(days_window=12 / 24)),
+            ("Telegram", lambda: fetch_telegram_data(days_window=12 / 24)),
             ("Bluesky", lambda: fetch_bluesky_infosec(limit=200, days_back=1, keyword="ransomware OR malware OR exploit")),
             ("Mastodon", lambda: fetch_mastodon_fosstodon(limit=200, days_back=1, hashtag="cybersecurity")),
             ("AlienVault OTX", lambda: fetch_otx_pulses(limit=250, days_back=1)),
@@ -94,19 +95,25 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
 
     if "vuln" in tiers:
         try:
-            cve_items = fetch_cve_data(days_window=1)
+            cve_items = fetch_cve_data(days_window=1, db_conn=db_conn)
             logging.info("Vulnerability sync returned: %s items", len(cve_items))
-            all_collected_items.extend(cve_items)
+            vuln_collected_items.extend(cve_items)
         except Exception as exc:
             logging.error("CVE collectors failed: %s", exc)
 
-    logging.info("Total raw items collected: %s", len(all_collected_items))
-    if all_collected_items:
+    total_collected = len(all_collected_items) + len(vuln_collected_items)
+    logging.info("Total raw items collected: %s", total_collected)
+    if all_collected_items or vuln_collected_items:
         inserted = save_items_batch(db_conn, all_collected_items)
-        logging.info("Phase 1 complete. Saved %s new unique records to database.", inserted)
+        upserted = upsert_items_batch(db_conn, vuln_collected_items)
+        logging.info(
+            "Phase 1 complete. Saved %s new social/news records and inserted/updated %s vulnerability records.",
+            inserted,
+            upserted,
+        )
         try:
             with open("collect_test.txt", "w", encoding="utf-8") as handle:
-                json.dump(all_collected_items, handle, ensure_ascii=False, indent=2)
+                json.dump(all_collected_items + vuln_collected_items, handle, ensure_ascii=False, indent=2)
         except Exception as exc:
             logging.error("Failed to write collect_test.txt: %s", exc)
     else:
