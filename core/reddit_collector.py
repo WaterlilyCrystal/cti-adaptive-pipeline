@@ -8,7 +8,7 @@ from langdetect import detect, LangDetectException
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Highly targeted cybersecurity subreddits (English + Chinese)
+# Selected public communities relevant to cybersecurity monitoring (English + Chinese)
 SUBREDDITS = [
     # === English ===
     "netsec", "blueteamsec", "threatintel", "malware", "ExploitDev", 
@@ -129,7 +129,7 @@ def fetch_reddit_rss_feed(days_window=3):
     logging.info(f"Scraping completed. Total items matching schema criteria: {len(collected_data)}")
     return collected_data
 
-# Independent verification block for Student A
+# Standalone local test entry point
 if __name__ == "__main__":
     print("=== TEST RUN: REDDIT RSS COLLECTOR (MULTILINGUAL) ===")
     results = fetch_reddit_rss_feed(days_window=3)

@@ -738,8 +738,8 @@ def run_processing(db_conn, cfg: Dict) -> int:
         success = update_analysis(
             db_conn,
             item["id"],
-            raw_iocs={},         # To be dynamically augmented by Student B inside Phase 3
-            ttp_mapping=[],      # To be dynamically augmented by Student B inside Phase 3
+            raw_iocs={},         # Populated during Phase 3 analysis
+            ttp_mapping=[],      # Populated during Phase 3 analysis
             relevance=item.get("relevance_score", 0.0)
         )
         if success:
