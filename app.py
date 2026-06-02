@@ -1,6 +1,7 @@
 import glob
 import os
 import sqlite3
+import textwrap
 
 import pandas as pd
 import streamlit as st
@@ -190,8 +191,9 @@ def inject_showcase_styles():
 
         .showcase-metric-p {
             color: #7dd3fc;
-            font-size: 13px;
+            font-size: 15px;
             margin-top: 7px;
+            line-height: 1.45;
         }
 
         .showcase-grid {
@@ -209,57 +211,78 @@ def inject_showcase_styles():
 
         .showcase-panel-note {
             color: #8fa6c7;
-            font-size: 12px;
-            line-height: 1.45;
+            font-size: 14px;
+            line-height: 1.6;
             margin-bottom: 12px;
         }
 
         .heatmap-wrap {
             display: grid;
-            gap: 10px;
+            gap: 9px;
         }
 
         .heatmap-head, .heatmap-row {
             display: grid;
-            grid-template-columns: 1.3fr repeat(4, 0.75fr);
+            grid-template-columns: minmax(120px, 1.45fr) repeat(4, minmax(54px, 0.7fr));
             gap: 8px;
             align-items: center;
         }
 
+        .heatmap-head {
+            padding: 0 2px 2px 2px;
+        }
+
         .heatmap-head div {
-            color: #8fa6c7;
-            font-size: 12px;
+            color: #7e97b7;
+            font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.7px;
+            font-weight: 700;
+        }
+
+        .heatmap-row {
+            border-radius: 14px;
+            padding: 8px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.035));
+            border: 1px solid rgba(148,163,184,0.10);
         }
 
         .heatmap-label {
-            color: #e6eefb;
-            font-size: 14px;
+            color: #f3f7fd;
+            font-size: 13px;
+            font-weight: 600;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-left: 2px;
         }
 
         .heatbox {
-            min-width: 48px;
+            min-width: 54px;
             text-align: center;
-            padding: 10px 0;
-            border-radius: 12px;
+            padding: 9px 0;
+            border-radius: 10px;
+            border: 1px solid transparent;
             font-family: 'IBM Plex Mono', monospace;
             font-size: 13px;
+            font-weight: 600;
         }
 
         .heat-low {
-            background: rgba(71, 189, 255, 0.10);
-            color: #c8f2ff;
+            background: rgba(51, 65, 85, 0.58);
+            border-color: rgba(100, 116, 139, 0.28);
+            color: #d9e6f7;
         }
 
         .heat-med {
-            background: rgba(255, 193, 94, 0.14);
-            color: #ffe4af;
+            background: rgba(255, 193, 94, 0.16);
+            border-color: rgba(255, 193, 94, 0.26);
+            color: #ffe2a1;
         }
 
         .heat-high {
             background: rgba(255, 91, 114, 0.18);
+            border-color: rgba(255, 91, 114, 0.26);
             color: #ffd2db;
         }
 
@@ -292,20 +315,35 @@ def inject_showcase_styles():
 
         .feature-p {
             color: #cedbeb;
-            font-size: 13px;
-            line-height: 1.45;
+            font-size: 14px;
+            line-height: 1.6;
         }
 
         .flow-step {
+            position: relative;
             display: grid;
-            grid-template-columns: 36px 1fr;
+            grid-template-columns: 38px 1fr;
             gap: 12px;
             align-items: start;
             margin-bottom: 12px;
+            padding: 10px 12px 10px 10px;
+            border-radius: 14px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(148,163,184,0.12);
         }
 
         .flow-step:last-child {
             margin-bottom: 0;
+        }
+
+        .flow-step:not(:last-child)::after {
+            content: "";
+            position: absolute;
+            left: 25px;
+            top: 38px;
+            bottom: -14px;
+            width: 1px;
+            background: linear-gradient(180deg, rgba(71,189,255,0.30), rgba(71,189,255,0.02));
         }
 
         .flow-num {
@@ -324,21 +362,36 @@ def inject_showcase_styles():
 
         .flow-title {
             color: white;
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 700;
-            margin-bottom: 4px;
+            margin-bottom: 3px;
         }
 
         .flow-copy {
-            color: #cedbeb;
-            font-size: 13px;
-            line-height: 1.45;
+            color: #bfd0e5;
+            font-size: 14px;
+            line-height: 1.6;
         }
 
         @media (max-width: 1100px) {
             .showcase-hero, .showcase-metrics, .showcase-grid {
                 grid-template-columns: 1fr !important;
             }
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            min-height: 46px;
+            padding: 8px 18px;
+        }
+
+        .stTabs [data-baseweb="tab"] p {
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: 0;
+        }
+
+        .stTabs [data-baseweb="tab-highlight"] {
+            height: 3px;
         }
         </style>
         """,
@@ -486,12 +539,12 @@ def render_overview(conn):
             {"asset": "Windows Server", "critical": 1, "high": 2, "medium": 0, "low": 0},
         ]
 
-    heatmap_html = """
+    heatmap_html = textwrap.dedent("""
     <div class="heatmap-wrap">
       <div class="heatmap-head">
         <div>Asset</div><div>Critical</div><div>High</div><div>Medium</div><div>Low</div>
       </div>
-    """
+    """)
     for row in heatmap_view:
         def heat_class(value):
             if value >= 2:
@@ -500,7 +553,7 @@ def render_overview(conn):
                 return "heat-med"
             return "heat-low"
 
-        heatmap_html += f"""
+        heatmap_html += textwrap.dedent(f"""
         <div class="heatmap-row">
           <div class="heatmap-label">{row['asset']}</div>
           <div class="heatbox {heat_class(row['critical'])}">{row['critical']}</div>
@@ -508,10 +561,10 @@ def render_overview(conn):
           <div class="heatbox {heat_class(row['medium'])}">{row['medium']}</div>
           <div class="heatbox {heat_class(row['low'])}">{row['low']}</div>
         </div>
-        """
+        """)
     heatmap_html += "</div>"
 
-    html = f"""
+    html = textwrap.dedent(f"""
     <div class="showcase-shell">
       <div class="showcase-hero">
         <div class="showcase-card">
@@ -589,24 +642,26 @@ def render_overview(conn):
           <div class="showcase-panel-title">Pipeline Flow</div>
           <div class="flow-step">
             <div class="flow-num">1</div>
-            <div><div class="flow-title">Collect</div><div class="flow-copy">Sources ingest public social chatter, feeds, and vulnerability intelligence.</div></div>
+            <div><div class="flow-title">Collect</div><div class="flow-copy">Public feeds, social posts, and CVE streams are normalized into a shared intake layer.</div></div>
           </div>
           <div class="flow-step">
             <div class="flow-num">2</div>
-            <div><div class="flow-title">Filter</div><div class="flow-copy">Noise is normalized, deduplicated, and scored before costly downstream analysis.</div></div>
+            <div><div class="flow-title">Filter</div><div class="flow-copy">Duplicate and low-signal records are reduced before deeper analysis spends local compute.</div></div>
           </div>
           <div class="flow-step">
             <div class="flow-num">3</div>
-            <div><div class="flow-title">Analyze</div><div class="flow-copy">LLM reasoning and ATT&amp;CK mapping convert raw text into analyst-usable CTI.</div></div>
+            <div><div class="flow-title">Analyze</div><div class="flow-copy">IOC extraction, LLM reasoning, and ATT&amp;CK mapping turn raw text into reviewable CTI.</div></div>
           </div>
           <div class="flow-step">
             <div class="flow-num">4</div>
-            <div><div class="flow-title">Report</div><div class="flow-copy">Executive, technical, and operational outputs support remediation and review.</div></div>
+            <div><div class="flow-title">Report</div><div class="flow-copy">Executive, technical, and operational outputs support remediation, triage, and auditability.</div></div>
           </div>
         </div>
       </div>
     </div>
-    """
+    """)
+    # Streamlit Markdown can treat indented HTML after blank lines as code blocks.
+    html = "\n".join(line.strip() for line in html.splitlines() if line.strip())
     st.markdown(html, unsafe_allow_html=True)
 
 

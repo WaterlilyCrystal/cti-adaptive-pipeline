@@ -272,12 +272,19 @@ def generate_text(
     trigger_cooldown: bool = True,
     num_ctx_override: int | None = None,
     timeout_override: int | None = None,
+    max_retries_override: int | None = None,
 ) -> str:
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
     headers = {"Content-Type": "application/json"}
     timeout = max(5, int(timeout_override)) if timeout_override is not None else _label_timeout(cfg, request_label, _request_timeout(cfg))
-    max_retries = _max_retries(cfg)
+    if max_retries_override is not None:
+        try:
+            max_retries = max(1, min(int(max_retries_override), 4))
+        except (TypeError, ValueError):
+            max_retries = _max_retries(cfg)
+    else:
+        max_retries = _max_retries(cfg)
     model_name = _selected_model or get_model_name(cfg)
     num_ctx = _num_ctx(cfg)
     if num_ctx_override is not None:

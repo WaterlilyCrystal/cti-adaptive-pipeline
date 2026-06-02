@@ -4,7 +4,7 @@ llm:
   model: qwen2.5:3b-instruct-q4_K_M
   fallback_models: []
   model_min_ram_overrides:
-    qwen2.5:3b-instruct-q4_K_M: 3.5
+    qwen2.5:3b-instruct-q4_K_M: 2.5
   base_url: http://localhost:11434
   num_ctx: 8192
   probe_num_ctx: 512

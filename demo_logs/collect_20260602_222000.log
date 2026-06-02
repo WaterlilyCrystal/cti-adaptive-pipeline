@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/mnt/f/Pentest20252/cti-adaptive-pipeline/pipeline.py", line 13, in <module>
+    import run_analysis
+  File "/mnt/f/Pentest20252/cti-adaptive-pipeline/run_analysis.py", line 5, in <module>
+    from analysis import ioc_extractor, llm_caller, osint_enricher, sigma_engine, ttp_mapper
+  File "/mnt/f/Pentest20252/cti-adaptive-pipeline/analysis/ioc_extractor.py", line 1, in <module>
+    import iocextract
+ModuleNotFoundError: No module named 'iocextract'

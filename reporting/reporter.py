@@ -1,12 +1,14 @@
 import json
 import logging
 import os
+import time
 from datetime import datetime
 
 from analysis.ollama_client import OllamaServiceError, generate_text
 
 logger = logging.getLogger("reporter")
 REPORT_KEYS = ("executive", "technical", "operational")
+_report_llm_disabled_until = 0.0
 
 REPORT_GUARDRAILS = {
     "en": """
@@ -221,6 +223,25 @@ def _build_report_context(threat_data: dict, iocs: dict, report_title: str) -> s
     return payload
 
 
+def _report_llm_disabled(cfg: dict | None = None) -> bool:
+    remaining = _report_llm_disabled_until - time.monotonic()
+    if remaining > 0:
+        logger.warning("Report LLM fallback mode active for %ss.", int(remaining))
+        return True
+    return False
+
+
+def _disable_report_llm(cfg: dict | None = None, reason: str = "") -> None:
+    global _report_llm_disabled_until
+    cooldown_seconds = 300
+    try:
+        cooldown_seconds = max(60, int((cfg or {}).get("reporting", {}).get("llm_failure_cooldown_seconds", 300)))
+    except (TypeError, ValueError):
+        cooldown_seconds = 300
+    _report_llm_disabled_until = time.monotonic() + cooldown_seconds
+    logger.error("Report LLM disabled for %ss: %s", cooldown_seconds, reason)
+
+
 def call_llm_for_report(
     system_prompt: str,
     data_context: str,
@@ -230,6 +251,8 @@ def call_llm_for_report(
     num_ctx_override: int = 2048,
     timeout_override: int = 45,
 ) -> str:
+    if _report_llm_disabled(cfg):
+        return ""
     try:
         return generate_text(
             prompt=(
@@ -245,8 +268,10 @@ def call_llm_for_report(
             trigger_cooldown=False,
             num_ctx_override=num_ctx_override,
             timeout_override=timeout_override,
+            max_retries_override=1,
         ).strip()
     except OllamaServiceError as exc:
+        _disable_report_llm(cfg, str(exc))
         logger.error("Report generation failed: %s", exc, exc_info=True)
         return ""
 
