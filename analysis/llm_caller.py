@@ -18,6 +18,8 @@ CRITICAL RULES FOR MITRE ATT&CK MAPPING:
 1. You MUST ONLY extract real, officially documented MITRE ATT&CK technique IDs (e.g., T1566 for Phishing, T1190 for Exploit Public-Facing Application).
 2. NEVER invent, guess, or use placeholder codes like 'T1234' or 'T0000'.
 3. If you cannot confidently map a real technique, leave the "suggested_techniques" array EMPTY []. Do not hallucinate.
+4. Do NOT choose phishing techniques unless the content explicitly describes phishing, email lures, attachments, credential harvesting pages, or social engineering.
+5. For public web application vulnerabilities, RCEs, auth bypasses, path traversal, SQL injection, or exposed service exploitation, prefer T1190 only when the content explicitly supports exploitation of a public-facing application.
 
 CONTENT:
 {content}
@@ -31,8 +33,9 @@ Respond with this EXACT JSON structure. If a field is not found, use an empty li
   "attack_vector": "brief description",
   "suggested_techniques": [
     {{
-      "technique_id": "T1566",
-      "confidence": "high/medium/low"
+      "technique_id": "T1190",
+      "confidence": "high/medium/low",
+      "evidence": "exact quote from content supporting this mapping"
     }}
   ],
   "summary_one_line": "summary here"

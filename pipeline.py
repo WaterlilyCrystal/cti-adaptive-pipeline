@@ -147,12 +147,29 @@ def phase_analyze(cfg: dict):
         except OllamaServiceError as exc:
             logging.error("Phase 3 skipped because Ollama is unavailable: %s", exc)
             return
-        all_pending_items = db_handler.get_pending(db_conn)
-        max_items_per_run = cfg.get("pipeline", {}).get("phase3_max_items", 5)
-        items_to_process = all_pending_items[:max_items_per_run] if max_items_per_run > 0 else all_pending_items
+        pipeline_cfg = cfg.get("pipeline", {})
+        max_items_per_run = max(1, int(pipeline_cfg.get("phase3_max_items", 20)))
+        recent_days = max(1, int(pipeline_cfg.get("phase3_recent_days", 30)))
+        relevant_only = bool(pipeline_cfg.get("phase3_relevant_only", True))
+        items_to_process = db_handler.get_analysis_candidates(
+            db_conn,
+            limit=max_items_per_run,
+            recent_days=recent_days,
+            relevant_only=relevant_only,
+        )
         if not items_to_process:
-            logging.info("No new feeds require AI analysis.")
+            logging.info(
+                "No deterministic analysis candidates found. relevant_only=%s recent_days=%s max_items=%s",
+                relevant_only,
+                recent_days,
+                max_items_per_run,
+            )
             return
+        logging.info(
+            "Selected %s deterministic analysis candidate(s): %s",
+            len(items_to_process),
+            [item.get("title", item.get("id"))[:120] for item in items_to_process],
+        )
         for item in items_to_process:
             try:
                 run_analysis.process_single_item(item, cfg=cfg, db_conn=db_conn, is_mock=False)

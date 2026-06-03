@@ -1,7 +1,9 @@
 import glob
+import json
 import os
 import sqlite3
 import textwrap
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -373,6 +375,42 @@ def inject_showcase_styles():
             line-height: 1.6;
         }
 
+        .alert-strip {
+            margin-top: 16px;
+            display: grid;
+            gap: 10px;
+        }
+
+        .alert-strip-item {
+            border-radius: 14px;
+            padding: 14px 16px;
+            background: linear-gradient(180deg, rgba(127,29,29,0.18), rgba(30,41,59,0.34));
+            border: 1px solid rgba(255,91,114,0.20);
+        }
+
+        .alert-strip-meta {
+            color: #ffb9c7;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.7px;
+            margin-bottom: 6px;
+            font-weight: 700;
+        }
+
+        .alert-strip-title {
+            color: #ffffff;
+            font-size: 15px;
+            font-weight: 700;
+            line-height: 1.4;
+            margin-bottom: 6px;
+        }
+
+        .alert-strip-copy {
+            color: #d5e2f2;
+            font-size: 14px;
+            line-height: 1.55;
+        }
+
         @media (max-width: 1100px) {
             .showcase-hero, .showcase-metrics, .showcase-grid {
                 grid-template-columns: 1fr !important;
@@ -418,6 +456,120 @@ def get_files_in_dir(directory, extension="*"):
     if not os.path.exists(directory):
         return []
     return sorted(glob.glob(os.path.join(directory, f"*.{extension}")))
+
+
+def _safe_report_group_name(base_name: str) -> str:
+    safe_name = "".join([c if c.isalnum() else "_" for c in str(base_name or "")]).lower()
+    if len(safe_name) > 100:
+        safe_name = safe_name[:90] + "_trim"
+    return safe_name
+
+
+def _severity_rank(value: str) -> int:
+    mapping = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    return mapping.get(str(value or "").lower(), 0)
+
+
+def _priority_rank(value: str) -> int:
+    mapping = {"critical": 4, "high": 3, "watching": 2, "routine": 1}
+    return mapping.get(str(value or "").lower(), 0)
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _load_impacted_assets(value: str) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return []
+
+
+def get_report_catalog(conn) -> list[dict]:
+    report_files = get_files_in_dir(REPORTS_DIR, "md")
+    if not report_files:
+        return []
+
+    grouped_files = {}
+    for path in report_files:
+        filename = os.path.basename(path)
+        base_group = filename.replace("_01_executive.md", "").replace("_02_technical.md", "").replace("_03_operational.md", "")
+        grouped_files.setdefault(base_group, {})
+        if "executive" in filename:
+            grouped_files[base_group]["Executive"] = path
+        elif "technical" in filename:
+            grouped_files[base_group]["Technical"] = path
+        elif "operational" in filename:
+            grouped_files[base_group]["Operational"] = path
+
+    rows = conn.execute(
+        """
+        SELECT id, title, severity, triage_priority, source_type, source, collected_at, impacted_assets
+        FROM intel_items
+        WHERE analyzed=1
+        """
+    ).fetchall()
+
+    best_by_group = {}
+    for row in rows:
+        item = dict(row)
+        group_name = _safe_report_group_name(item.get("title", ""))
+        if group_name not in grouped_files:
+            continue
+        item["impacted_assets"] = _load_impacted_assets(item.get("impacted_assets"))
+        item["_severity_rank"] = _severity_rank(item.get("severity"))
+        item["_priority_rank"] = _priority_rank(item.get("triage_priority"))
+        item["_collected_dt"] = _parse_iso_datetime(item.get("collected_at"))
+        current = best_by_group.get(group_name)
+        if current is None:
+            best_by_group[group_name] = item
+            continue
+        if (
+            item["_priority_rank"],
+            item["_severity_rank"],
+            item["_collected_dt"],
+        ) > (
+            current["_priority_rank"],
+            current["_severity_rank"],
+            current["_collected_dt"],
+        ):
+            best_by_group[group_name] = item
+
+    catalog = []
+    for group_name, metadata in best_by_group.items():
+        display_title = metadata.get("title") or group_name
+        impacted_assets = metadata.get("impacted_assets") or []
+        catalog.append(
+            {
+                "group_name": group_name,
+                "display_title": display_title,
+                "severity": str(metadata.get("severity") or "low").lower(),
+                "triage_priority": str(metadata.get("triage_priority") or "routine").lower(),
+                "source_type": str(metadata.get("source_type") or ""),
+                "source": str(metadata.get("source") or ""),
+                "collected_at": metadata.get("collected_at") or "",
+                "collected_dt": metadata["_collected_dt"],
+                "impacted_assets": impacted_assets,
+                "files": grouped_files[group_name],
+            }
+        )
+
+    catalog.sort(
+        key=lambda item: (
+            _priority_rank(item["triage_priority"]),
+            _severity_rank(item["severity"]),
+            item["collected_dt"],
+        ),
+        reverse=True,
+    )
+    return catalog
 
 
 def open_connection():
@@ -511,6 +663,7 @@ def save_profile_form(conn):
 
 def render_overview(conn):
     alerts = db_handler.get_dashboard_alerts(conn)
+    recent_matched_alerts = db_handler.get_recent_matched_alerts(conn, hours=24, limit=5)
     indicator = sleep_well_indicator([alert for alert in alerts if alert.get("resolution_status") not in {"mitigated", "accepted_risk", "not_applicable"}])
     open_alerts = [alert for alert in alerts if alert.get("triage_status") != "closed"]
     critical_open = sum(1 for alert in open_alerts if alert.get("severity") == "critical")
@@ -664,6 +817,29 @@ def render_overview(conn):
     html = "\n".join(line.strip() for line in html.splitlines() if line.strip())
     st.markdown(html, unsafe_allow_html=True)
 
+    st.subheader("Latest Relevant Alerts")
+    if recent_matched_alerts:
+        alert_html = ['<div class="alert-strip">']
+        for alert in recent_matched_alerts:
+            matched_assets = ", ".join(alert.get("impacted_assets", [])[:3]) or "Matched stack asset"
+            summary = (alert.get("notification_payload", {}) or {}).get("summary") or "Newly analyzed threat matched the configured organization stack."
+            meta = f"{str(alert.get('triage_priority', 'routine')).upper()} | {str(alert.get('severity', 'low')).upper()} | {matched_assets}"
+            alert_html.append(
+                textwrap.dedent(
+                    f"""
+                    <div class="alert-strip-item">
+                      <div class="alert-strip-meta">{meta}</div>
+                      <div class="alert-strip-title">{alert.get('title') or alert.get('id')}</div>
+                      <div class="alert-strip-copy">{summary}</div>
+                    </div>
+                    """
+                ).strip()
+            )
+        alert_html.append("</div>")
+        st.markdown("\n".join(alert_html), unsafe_allow_html=True)
+    else:
+        st.info("No newly matched threats were detected for the configured tech stack in the last 24 hours.")
+
 
 def render_feed(conn):
     st.header("Real-Time Threat Feed")
@@ -702,31 +878,55 @@ def render_feed(conn):
                 st.success("Threat workflow updated.")
 
 
-def render_reports():
+def render_reports(conn):
     st.header("Reports")
-    report_files = get_files_in_dir(REPORTS_DIR, "md")
-    if not report_files:
+    catalog = get_report_catalog(conn)
+    if not catalog:
         st.warning(f"No reports found in {REPORTS_DIR}.")
         return
 
-    report_groups = {}
-    for path in report_files:
-        filename = os.path.basename(path)
-        base_group = filename.replace("_01_executive.md", "").replace("_02_technical.md", "").replace("_03_operational.md", "")
-        report_groups.setdefault(base_group, {})
-        if "executive" in filename:
-            report_groups[base_group]["Executive"] = path
-        elif "technical" in filename:
-            report_groups[base_group]["Technical"] = path
-        elif "operational" in filename:
-            report_groups[base_group]["Operational"] = path
+    col1, col2, col3 = st.columns(3)
+    severity_filter = col1.selectbox("Severity", ["all", "critical", "high", "medium", "low"], key="reports_severity_filter")
+    recency_filter = col2.selectbox("Age window", ["7 days", "30 days", "90 days", "All time"], index=1, key="reports_age_window")
+    relevant_only = col3.checkbox("Relevant to org stack only", value=True, key="reports_relevant_only")
 
-    selected_group = st.selectbox("Threat Event", list(report_groups.keys()))
-    files_to_show = report_groups[selected_group]
+    cutoff_days = {"7 days": 7, "30 days": 30, "90 days": 90}.get(recency_filter)
+    filtered_catalog = []
+    now = datetime.now(timezone.utc)
+    for item in catalog:
+        if severity_filter != "all" and item["severity"] != severity_filter:
+            continue
+        if relevant_only and not item["impacted_assets"]:
+            continue
+        if cutoff_days is not None and (now - item["collected_dt"]).days > cutoff_days:
+            continue
+        filtered_catalog.append(item)
+
+    if not filtered_catalog:
+        st.info("No report matches the current deterministic filters.")
+        return
+
+    def _report_option_label(item: dict) -> str:
+        assets = ", ".join(item["impacted_assets"][:2]) if item["impacted_assets"] else "No matched asset"
+        date_label = item["collected_dt"].strftime("%Y-%m-%d")
+        return f"[{item['triage_priority']}/{item['severity']}] {item['display_title']} | {date_label} | {assets}"
+
+    selected_entry = st.selectbox(
+        "Threat Event",
+        filtered_catalog,
+        format_func=_report_option_label,
+        key="reports_threat_event",
+    )
+
+    st.caption(
+        f"Sorted by priority, severity, then recency. Source: {selected_entry['source']} | "
+        f"Collected: {selected_entry['collected_dt'].strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+    files_to_show = selected_entry["files"]
     for label in ["Executive", "Technical", "Operational"]:
         if label in files_to_show:
-            st.subheader(label)
-            st.markdown(read_file_content(files_to_show[label]))
+            with st.expander(label, expanded=(label == "Executive")):
+                st.markdown(read_file_content(files_to_show[label]))
 
 
 def render_sigma():
@@ -762,7 +962,7 @@ with tab_profile:
     save_profile_form(conn)
 
 with tab_reports:
-    render_reports()
+    render_reports(conn)
 
 with tab_sigma:
     render_sigma()

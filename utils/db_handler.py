@@ -503,6 +503,68 @@ def get_pending(conn: sqlite3.Connection) -> List[Dict]:
     return [dict(row) for row in rows]
 
 
+def get_analysis_candidates(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 1,
+    recent_days: int = 30,
+    relevant_only: bool = True,
+) -> List[Dict]:
+    cutoff_ts = datetime.now(timezone.utc).timestamp() - max(1, int(recent_days)) * 86400
+    rows = conn.execute(
+        """
+        SELECT i.*,
+               CASE WHEN i.impacted_assets IS NOT NULL AND i.impacted_assets != '' AND i.impacted_assets != '[]' THEN 1 ELSE 0 END AS has_impacted_assets,
+               CASE WHEN EXISTS (
+                    SELECT 1 FROM tech_stack_vulnerabilities tv
+                    WHERE tv.intel_id = i.id AND tv.is_relevant = 1
+               ) THEN 1 ELSE 0 END AS has_profile_match,
+               CASE WHEN i.source IN ('NVD', 'CISA-KEV') OR i.source_type IN ('feed', 'Threat Feed') THEN 1 ELSE 0 END AS is_vuln_feed
+        FROM intel_items i
+        WHERE i.processed=1
+          AND i.analyzed=0
+          AND i.triage_status IN ('queued', 'critical', 'matched', 'watching')
+        ORDER BY
+          has_profile_match DESC,
+          has_impacted_assets DESC,
+          is_vuln_feed DESC,
+          CASE i.triage_priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'watching' THEN 2 ELSE 1 END DESC,
+          i.credibility_score DESC,
+          i.confidence DESC,
+          i.collected_at DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)) * 8,),
+    ).fetchall()
+
+    candidates = []
+    fallback_candidates = []
+    for row in rows:
+        item = dict(row)
+        try:
+            collected_ts = datetime.fromisoformat(str(item.get("collected_at", "")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            collected_ts = 0
+
+        is_recent = collected_ts >= cutoff_ts
+        is_relevant = bool(item.pop("has_impacted_assets", 0) or item.pop("has_profile_match", 0))
+        item.pop("is_vuln_feed", None)
+
+        if is_recent and (is_relevant or not relevant_only):
+            candidates.append(item)
+        elif is_relevant:
+            fallback_candidates.append(item)
+
+        if len(candidates) >= limit:
+            break
+
+    if candidates:
+        return candidates[:limit]
+    if relevant_only:
+        return fallback_candidates[:limit]
+    return [dict(row) for row in rows[:limit]]
+
+
 def update_processing(
     conn: sqlite3.Connection,
     item_id: str,
@@ -644,6 +706,44 @@ def get_dashboard_alerts(
         item["impacted_assets"] = _json_load(item.get("impacted_assets"), [])
         item["notification_payload"] = _json_load(item.get("notification_payload"), {})
         results.append(item)
+    return results
+
+
+def get_recent_matched_alerts(
+    conn: sqlite3.Connection,
+    *,
+    hours: int = 24,
+    limit: int = 6,
+) -> List[Dict]:
+    rows = conn.execute(
+        """
+        SELECT id, title, source, source_type, severity, triage_priority, impacted_assets,
+               collected_at, notification_payload, url, resolution_status
+        FROM intel_items
+        WHERE analyzed=1
+          AND impacted_assets IS NOT NULL
+          AND impacted_assets != ''
+          AND impacted_assets != '[]'
+          AND (resolution_status IS NULL OR resolution_status NOT IN ('mitigated', 'accepted_risk', 'not_applicable'))
+        ORDER BY CASE triage_priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'watching' THEN 2 ELSE 1 END DESC,
+                 collected_at DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+    cutoff = datetime.now(timezone.utc).timestamp() - max(1, int(hours)) * 3600
+    results = []
+    for row in rows:
+        item = dict(row)
+        item["impacted_assets"] = _json_load(item.get("impacted_assets"), [])
+        item["notification_payload"] = _json_load(item.get("notification_payload"), {})
+        try:
+            collected_at = datetime.fromisoformat(str(item.get("collected_at", "")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            collected_at = 0
+        if collected_at >= cutoff:
+            results.append(item)
     return results
 
 

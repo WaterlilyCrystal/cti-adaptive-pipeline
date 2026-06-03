@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Dict, List
 
 logger = logging.getLogger("ttp_mapper")
@@ -11,6 +12,32 @@ BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 MITRE_DATA_PATH = os.path.join(BASE_DIR, "data", "enterprise-attack.json")
 MITRE_INDEX_PATH = os.path.join(BASE_DIR, "data", "enterprise-attack-index.json")
 _mitre_index: Dict[str, Dict] | None = None
+
+PHISHING_TERMS = (
+    "phishing",
+    "spearphishing",
+    "credential harvest",
+    "credential harvesting",
+    "email lure",
+    "malicious attachment",
+    "malicious link",
+)
+
+PUBLIC_APP_EXPLOIT_TERMS = (
+    "remote code execution",
+    "rce",
+    "authentication bypass",
+    "auth bypass",
+    "path traversal",
+    "sql injection",
+    "command injection",
+    "public-facing",
+    "web application",
+    "apache",
+    "nginx",
+    "wordpress",
+    "superset",
+)
 
 
 def _load_json(path: str) -> Dict:
@@ -96,7 +123,18 @@ def _get_mitre_index() -> Dict[str, Dict]:
     return _mitre_index
 
 
-def validate_and_enrich_ttps(llm_suggested_ttps: list) -> list:
+def _content_supports_phishing(text: str) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in PHISHING_TERMS)
+
+
+def _content_supports_public_app_exploit(text: str) -> bool:
+    lowered = text.lower()
+    has_cve = bool(re.search(r"(?i)CVE-\d{4}-\d{4,7}", text))
+    return has_cve and any(term in lowered for term in PUBLIC_APP_EXPLOIT_TERMS)
+
+
+def validate_and_enrich_ttps(llm_suggested_ttps: list, evidence_text: str = "") -> list:
     mitre_index = _get_mitre_index()
     if not mitre_index:
         return []
@@ -104,9 +142,17 @@ def validate_and_enrich_ttps(llm_suggested_ttps: list) -> list:
     validated_ttps = []
     for ttp in llm_suggested_ttps:
         tech_id = ttp.get("technique_id", "")
+        confidence = str(ttp.get("confidence", "")).lower()
+        evidence = str(ttp.get("evidence", "")).strip()
         metadata = mitre_index.get(tech_id)
         if not metadata:
             logger.info("Rejected unknown ATT&CK technique: %s", tech_id)
+            continue
+        if confidence == "low":
+            logger.info("Rejected low-confidence ATT&CK technique: %s", tech_id)
+            continue
+        if tech_id.startswith("T1566") and not _content_supports_phishing(f"{evidence_text} {evidence}"):
+            logger.info("Rejected phishing ATT&CK technique without phishing evidence: %s", tech_id)
             continue
 
         enriched = dict(ttp)
@@ -114,6 +160,20 @@ def validate_and_enrich_ttps(llm_suggested_ttps: list) -> list:
         enriched["tactic"] = metadata.get("tactic", [])
         enriched["is_valid"] = True
         validated_ttps.append(enriched)
+
+    if not validated_ttps and _content_supports_public_app_exploit(evidence_text):
+        metadata = mitre_index.get("T1190")
+        if metadata:
+            validated_ttps.append(
+                {
+                    "technique_id": "T1190",
+                    "confidence": "medium",
+                    "evidence": "Detected CVE and public application exploitation terminology in the source content.",
+                    "technique_name_official": metadata.get("technique_name_official", ""),
+                    "tactic": metadata.get("tactic", []),
+                    "is_valid": True,
+                }
+            )
 
     return validated_ttps
 

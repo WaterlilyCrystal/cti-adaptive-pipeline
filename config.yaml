@@ -18,7 +18,7 @@ llm:
   cooldown_seconds: 180
 
 reporting:
-  mode: fast
+  mode: template
   generate_secondary_language_summary: false
 
 resources:
@@ -79,7 +79,9 @@ pipeline:
   min_confidence: 0.50    # Minimum score required to keep an item for analysis
   max_content_chars: 5000 # Maximum content length forwarded to the LLM layer
   ram_threshold_pct: 85   # Pause memory-intensive operations above this threshold
-  phase3_max_items: 5     # Maximum items analyzed in one Phase 3 run
+  phase3_max_items: 20    # Analyze all deterministic candidates up to this batch cap
+  phase3_recent_days: 30  # Prefer recent analysis candidates for reports
+  phase3_relevant_only: true # Prioritize items already matched to the organization tech stack
   phase3_stop_after_consecutive_llm_failures: 1
 
   # Memory-aware processing controls

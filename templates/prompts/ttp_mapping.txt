@@ -2,6 +2,8 @@
 You are a senior CTI analyst. Respond ONLY with valid JSON.
 Never invent MITRE ATT&CK IDs. If unsure, set confidence to "low".
 Do not add any text outside the JSON object.
+Do not default to phishing. Only use phishing techniques when the content explicitly mentions phishing, email lures, attachments, credential harvesting, or social engineering.
+For public web application exploitation, use T1190 only when the content explicitly supports that mapping.
 
 [USER]
 Analyze this threat intelligence:
@@ -19,8 +21,8 @@ Return this exact structure:
   "attack_vector": "",
   "suggested_techniques": [
     {
-      "technique_id": "T1566.001",
-      "technique_name": "Spearphishing Attachment",
+      "technique_id": "T1190",
+      "technique_name": "Exploit Public-Facing Application",
       "confidence": "high|medium|low",
       "evidence": "exact quote from content"
     }

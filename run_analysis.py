@@ -51,13 +51,15 @@ def process_single_item(item: dict, cfg: dict | None = None, db_conn=None, is_mo
 
     print("\n[Step 3] Validating MITRE codes...")
     raw_ttps = cti_data.get("suggested_techniques", [])
-    valid_ttps = ttp_mapper.validate_and_enrich_ttps(raw_ttps)
+    valid_ttps = ttp_mapper.validate_and_enrich_ttps(raw_ttps, evidence_text=f"{title}\n{enriched_content}")
 
     print("\n[Step 4] Generating behavioral reasoning & Sigma rules...")
     for ttp in valid_ttps:
         tech_id = ttp["technique_id"]
         tech_name = ttp.get("technique_name_official", "Unknown")
-        reasoning = llm_caller.generate_reasoning(enriched_content, tech_id, tech_name, cfg=cfg)
+        reasoning = ttp.get("evidence", "")
+        if not reasoning:
+            reasoning = llm_caller.generate_reasoning(enriched_content, tech_id, tech_name, cfg=cfg)
         ttp["reasoning"] = reasoning
 
         sigma_vars = {

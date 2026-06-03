@@ -272,7 +272,7 @@ def call_llm_for_report(
         ).strip()
     except OllamaServiceError as exc:
         _disable_report_llm(cfg, str(exc))
-        logger.error("Report generation failed: %s", exc, exc_info=True)
+        logger.error("Report generation failed; using deterministic fallback report: %s", exc)
         return ""
 
 

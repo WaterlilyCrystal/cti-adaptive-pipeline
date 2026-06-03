@@ -28,20 +28,20 @@ logger = logging.getLogger("rss_collector")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Fallback source list
-# # === ENGLISH (Primary sources) ===
-#   "CISA Advisories": "https://www.cisa.gov/uscert/ncas/current-activity.xml",
-#   "SANS ISC Diary": "https://isc.sans.edu/rssfeed.xml",
-#   "BleepingComputer": "https://www.bleepingcomputer.com/feed/",
-#   "SecurityWeek": "https://feeds.feedburner.com/securityweek",
-#   "The Record": "https://therecord.media/feed/",
-#   "Microsoft Security Blog": "https://www.microsoft.com/en-us/security/blog/feed/",
-#   "Google Security Blog": "https://security.googleblog.com/atom.xml",
-#   "Krebs on Security": "https://krebsonsecurity.com/feed/",
-#   "Hacker News (Security)": "https://feeds.hnrss.org/frontpage",
-#   "Dark Reading": "https://www.darkreading.com/rss.xml",
+
 SOURCES = {
-  
+  # Fallback source list
+# === ENGLISH (Primary sources) ===
+  "CISA Advisories": "https://www.cisa.gov/uscert/ncas/current-activity.xml",
+  "SANS ISC Diary": "https://isc.sans.edu/rssfeed.xml",
+  "BleepingComputer": "https://www.bleepingcomputer.com/feed/",
+  "SecurityWeek": "https://feeds.feedburner.com/securityweek",
+  "The Record": "https://therecord.media/feed/",
+  "Microsoft Security Blog": "https://www.microsoft.com/en-us/security/blog/feed/",
+  "Google Security Blog": "https://security.googleblog.com/atom.xml",
+  "Krebs on Security": "https://krebsonsecurity.com/feed/",
+  "Hacker News (Security)": "https://feeds.hnrss.org/frontpage",
+  "Dark Reading": "https://www.darkreading.com/rss.xml",
   
   # === RUSSIAN (Cyberattacks, APTs, malware) ===
   "Xakep (Russian Security)": "https://xakep.ru/feed/",
