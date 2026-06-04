@@ -2,6 +2,16 @@
 llm:
   runtime: ollama
   model: qwen2.5:3b-instruct-q4_K_M
+  # To benchmark an external API, set runtime to deepseek/openrouter/groq/openai_compatible
+  # and configure api_base_url + api_key_env. Example DeepSeek values:
+  # runtime: deepseek
+  # model: deepseek-chat
+  # api_base_url: https://api.deepseek.com
+  # api_key_env: DEEPSEEK_API_KEY
+  api_base_url: ""
+  api_key_env: ""
+  http_referer: ""
+  app_title: "CTI Adaptive Pipeline"
   fallback_models: []
   model_min_ram_overrides:
     qwen2.5:3b-instruct-q4_K_M: 2.5
@@ -88,6 +98,9 @@ pipeline:
   enable_semantic_dedup: false       # Faster processing path when resource limits are tight
   dedup_window_size: 50              # Only used when semantic de-duplication is enabled
   batch_processing_size: 500         # Smaller batches reduce RAM pressure but increase DB queries
+  enable_llm_dedup: false            # Optional API/local LLM pairwise dedup; keep off for rate limits
+  llm_dedup_max_pairs: 25            # Hard cap for LLM-assisted dedup comparisons per batch
+  llm_dedup_timeout_seconds: 20
 
 # API keys (populate via .env in normal use)
 api_keys:

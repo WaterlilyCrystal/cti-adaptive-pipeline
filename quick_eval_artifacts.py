@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import statistics
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,12 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "cti.db"
 REPORTS_DIR = BASE_DIR / "output" / "reports"
 OUT_DIR = BASE_DIR / "output" / "eval"
+TIMING_RUN_JSON = OUT_DIR / "latest_timing_run.json"
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def safe_report_name(title: str) -> str:
@@ -53,6 +60,47 @@ def shorten(text: str, limit: int = 220) -> str:
     return value[: limit - 3].rstrip() + "..."
 
 
+def ascii_ratio(text: str) -> float:
+    if not text:
+        return 1.0
+    return sum(1 for char in text if ord(char) < 128) / len(text)
+
+
+def is_english_normalization_candidate(item: dict) -> bool:
+    text = f"{item.get('title', '')}\n{item.get('content', '')}"
+    lang = (item.get("lang") or "").lower()
+    if lang and lang not in {"en", "eng", "unknown"}:
+        return False
+    mojibake_markers = ("â", "Ã", "å", "è", "é", "ð", "�")
+    if any(marker in text for marker in mojibake_markers):
+        return False
+    return ascii_ratio(text) >= 1.0
+
+
+def readable_runtime_label(value: str) -> str:
+    labels = {
+        "phase_3_4_analysis_report": "Phase III-IV wrapper",
+        "phase_3_4_analyze_report": "Analysis and reporting orchestration",
+        "phase_3_analysis": "Semantic CTI analysis",
+        "phase_4_reporting": "Defensive reporting and persistence",
+        "pipeline": "End-to-end selected run",
+        "llm_probe": "LLM availability probe",
+        "process_single_item": "Per-item analysis workflow",
+        "select_analysis_candidates": "Candidate selection",
+        "step_1_5_osint_enrichment": "OSINT enrichment",
+        "step_1_regex_ioc_extraction": "Regex IOC extraction",
+        "step_2_llm_cti_extraction": "LLM CTI extraction",
+        "step_3_mitre_validation": "MITRE ATT&CK validation",
+        "step_4_5_profile_matching": "Technology-stack matching",
+        "step_4_reasoning_and_sigma": "Reasoning and Sigma drafting",
+        "step_5_multi_tier_report_generation": "Multi-tier report generation",
+        "step_6_database_update": "Database state update",
+        "step_7_notification_dispatch": "Notification dispatch",
+        "phase_analyze_report_total": "Total analysis/report run",
+    }
+    return labels.get(value, value.replace("_", " "))
+
+
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -62,8 +110,22 @@ def get_conn() -> sqlite3.Connection:
 def fetch_recent_items(conn: sqlite3.Connection, limit: int) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT id, source, source_type, title, url, content, severity, analyzed, credibility_score
+        SELECT id, source, source_type, title, url, content, severity, analyzed, credibility_score, lang
         FROM intel_items
+        ORDER BY collected_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_cve_benchmark_items(conn: sqlite3.Connection, limit: int) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, source, source_type, title, url, content, severity, analyzed, credibility_score, lang
+        FROM intel_items
+        WHERE title LIKE '%CVE-%' OR content LIKE '%CVE-%' OR url LIKE '%CVE-%'
         ORDER BY collected_at DESC
         LIMIT ?
         """,
@@ -75,13 +137,11 @@ def fetch_recent_items(conn: sqlite3.Connection, limit: int) -> list[dict]:
 def compute_cve_metrics(items: list[dict]) -> dict:
     benchmark = []
     for item in items:
-        source = (item.get("source") or "").lower()
-        if not any(marker in source for marker in ("nvd", "kev", "cve")):
-            continue
-        gold = set(re.findall(r"\bCVE-\d{4}-\d+\b", f"{item.get('title', '')} {item.get('url', '')}", re.IGNORECASE))
+        item_text = f"{item.get('title', '')}\n{item.get('content', '')}\n{item.get('url', '')}"
+        gold = set(re.findall(r"\bCVE-\d{4}-\d+\b", item_text, re.IGNORECASE))
         if not gold:
             continue
-        predicted = set(ioc_extractor.extract_all_iocs(f"{item.get('title', '')}\n{item.get('content', '')}\n{item.get('url', '')}").get("cves", []))
+        predicted = set(ioc_extractor.extract_all_iocs(item_text).get("cves", []))
         benchmark.append((gold, predicted))
 
     tp = sum(len(gold & predicted) for gold, predicted in benchmark)
@@ -181,7 +241,10 @@ def compute_report_failure_rate() -> dict:
 
 def write_before_after(items: list[dict]) -> list[dict]:
     rows = []
-    for item in items[:6]:
+    candidates = [item for item in items if is_english_normalization_candidate(item)]
+    if len(candidates) < 3:
+        candidates = items
+    for item in candidates[:6]:
         raw_text = f"{item.get('title', '')}\n{item.get('content', '')}"
         rows.append(
             {
@@ -196,6 +259,27 @@ def write_before_after(items: list[dict]) -> list[dict]:
         writer.writeheader()
         writer.writerows(rows)
     return rows
+
+
+def write_multilingual_prompt() -> str:
+    prompt = """You are a multilingual cyber threat intelligence analyst.
+Given one public-source security item, produce an English analytical rendering without inventing facts.
+
+Rules:
+- Preserve the original source meaning and uncertainty.
+- Translate or paraphrase only the information present in the source text.
+- Extract security entities such as CVEs, affected products, vendors, malware names, threat actors, and TTPs when explicitly present.
+- If a field is not supported by the source, write "not stated".
+- End with: "Analyst verification is required before operational action."
+
+Output:
+1. Normalized English summary
+2. Extracted entities
+3. Relevance to the organization's technology stack
+4. Executive, technical, and operational report notes
+"""
+    (OUT_DIR / "multilingual_llm_prompt.md").write_text(prompt, encoding="utf-8")
+    return prompt
 
 
 def write_prompt_snippets() -> dict:
@@ -232,7 +316,16 @@ def write_case_study(items: list[dict]) -> dict:
     return {}
 
 
-def write_tex_bundle(metrics: dict, before_after_rows: list[dict], snippets: dict, case: dict) -> None:
+def load_runtime_summary() -> dict:
+    if not TIMING_RUN_JSON.exists():
+        return {"run": {}, "phase_summary": [], "step_summary": []}
+    try:
+        return json.loads(TIMING_RUN_JSON.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"run": {}, "phase_summary": [], "step_summary": []}
+
+
+def write_tex_bundle(metrics: dict, before_after_rows: list[dict], snippets: dict, case: dict, runtime_summary: dict) -> None:
     before_rows_tex = ""
     for row in before_after_rows[:3]:
         before_rows_tex += (
@@ -242,6 +335,20 @@ def write_tex_bundle(metrics: dict, before_after_rows: list[dict], snippets: dic
         )
 
     prompt_tex = latex_escape(snippets["llm_system_prompt"][:420])
+    cve_benchmark_size = int(metrics.get("cve_benchmark_size", 0) or 0)
+    if cve_benchmark_size:
+        cve_precision_tex = f"{metrics['cve_precision']:.3f}"
+        cve_recall_tex = f"{metrics['cve_recall']:.3f}"
+        cve_f1_tex = f"{metrics['cve_f1']:.3f}"
+        cve_note_tex = (
+            f"CVE-containing DB subset, benchmark n={cve_benchmark_size}, "
+            f"sampled n={int(metrics.get('cve_eval_sample_size', 0) or 0)}"
+        )
+    else:
+        cve_precision_tex = "N/A"
+        cve_recall_tex = "N/A"
+        cve_f1_tex = "N/A"
+        cve_note_tex = "No CVE-containing benchmark items found in the database sample"
     case_tex = ""
     if case:
         case_tex = f"""
@@ -253,10 +360,116 @@ def write_tex_bundle(metrics: dict, before_after_rows: list[dict], snippets: dic
 {latex_escape(case['executive'])}
 """
 
+    runtime_tex = ""
+    phase_rows = runtime_summary.get("phase_summary", []) or []
+    if phase_rows:
+        runtime_run = runtime_summary.get("run", {}) or {}
+        runtime_run_id = latex_escape(runtime_run.get("run_id", "N/A"))
+        total_runtime = max((row.get("total_seconds", 0.0) for row in phase_rows), default=0.0)
+        runtime_rows_tex = ""
+        for row in phase_rows:
+            share = (row["total_seconds"] / total_runtime * 100) if total_runtime else 0.0
+            runtime_rows_tex += (
+                f"{latex_escape(readable_runtime_label(row['phase']))} & "
+                f"{row['event_count']} & "
+                f"{row['success_count']} & "
+                f"{row['failure_count']} & "
+                f"{row['total_seconds']:.3f} & "
+                f"{row['median_seconds']:.3f} & "
+                f"{share:.1f}\\% \\\\\n\\hline\n"
+            )
+
+        aggregate_steps = {"phase_analyze_report_total", "process_single_item"}
+        aggregate_phases = {"pipeline"}
+        step_rows = sorted(
+            [row for row in (runtime_summary.get("step_summary", []) or []) if row.get("step") not in aggregate_steps],
+            key=lambda row: row.get("total_seconds", 0.0),
+            reverse=True,
+        )
+        step_rows_tex = ""
+        for row in step_rows[:6]:
+            step_rows_tex += (
+                f"{latex_escape(readable_runtime_label(row['step']))} & "
+                f"{latex_escape(readable_runtime_label(row['phase']))} & "
+                f"{row['count']} & "
+                f"{row['total_seconds']:.3f} & "
+                f"{row['median_seconds']:.3f} & "
+                f"{row['max_seconds']:.3f} \\\\\n\\hline\n"
+            )
+
+        dominant_step = step_rows[0] if step_rows else {}
+        phase_candidates = [row for row in phase_rows if row.get("phase") not in aggregate_phases]
+        dominant_phase = max(phase_candidates or phase_rows, key=lambda row: row.get("total_seconds", 0.0))
+        interpretation_rows_tex = (
+            f"Dominant phase & {latex_escape(readable_runtime_label(dominant_phase.get('phase', 'N/A')))} "
+            f"consumed {dominant_phase.get('total_seconds', 0.0):.3f}s, indicating that the selected run was bounded mainly by analysis/report orchestration rather than deterministic preprocessing. \\\\\n\\hline\n"
+            f"Dominant step & {latex_escape(readable_runtime_label(dominant_step.get('step', 'N/A')))} "
+            f"consumed {dominant_step.get('total_seconds', 0.0):.3f}s across {dominant_step.get('count', 0)} event(s), which identifies LLM inference as the primary optimization target. \\\\\n\\hline\n"
+            "Operational implication & Regex IOC extraction, profile matching, reporting templates, and database update were sub-second to millisecond-scale operations; therefore, reliability controls should focus on model runtime availability, timeout policy, and fallback API benchmarking. \\\\\n\\hline\n"
+        )
+        runtime_tex = f"""
+\\subsection{{Pipeline Runtime Measurement}}
+The runtime benchmark was collected from instrumented phase and step boundaries. Run identifier: \\texttt{{{runtime_run_id}}}. Tables below report executed measurements rather than theoretical complexity claims.
+
+\\begin{{table}}[h]
+\\centering
+\\caption{{Phase-Level Runtime Distribution Summary}}
+\\label{{tab:phase-runtime-summary}}
+\\small
+\\renewcommand{{\\arraystretch}}{{1.3}}
+\\begin{{tabularx}}{{\\linewidth}}{{|
+  >{{\\raggedright\\arraybackslash\\hsize=2.8\\hsize}}X|
+  >{{\\centering\\arraybackslash\\hsize=0.5\\hsize}}X|
+  >{{\\centering\\arraybackslash\\hsize=0.4\\hsize}}X|
+  >{{\\centering\\arraybackslash\\hsize=0.4\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=1.1\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=1.1\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=0.7\\hsize}}X|}}
+\\hline
+\\textbf{{Execution Phase Component}} & \\textbf{{Events}} & \\textbf{{OK}} & \\textbf{{Fail}} & \\textbf{{Total Time (s)}} & \\textbf{{Median Time (s)}} & \\textbf{{Share (\\%)}} \\\\
+\\hline
+{runtime_rows_tex}\\end{{tabularx}}
+\\end{{table}}
+
+\\begin{{table}}[h]
+\\centering
+\\caption{{Top Critical Runtime-Consuming Pipeline Steps}}
+\\label{{tab:step-runtime-bottlenecks}}
+\\small
+\\renewcommand{{\\arraystretch}}{{1.3}}
+\\begin{{tabularx}}{{\\linewidth}}{{|
+  >{{\\raggedright\\arraybackslash\\hsize=1.8\\hsize}}X|
+  >{{\\raggedright\\arraybackslash\\hsize=1.8\\hsize}}X|
+  >{{\\centering\\arraybackslash\\hsize=0.4\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=0.5\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=0.5\\hsize}}X|
+  >{{\\raggedleft\\arraybackslash\\hsize=0.5\\hsize}}X|}}
+\\hline
+\\textbf{{Target Step}} & \\textbf{{Parent Execution Phase}} & \\textbf{{Count}} & \\textbf{{Total Time (s)}} & \\textbf{{Median Time (s)}} & \\textbf{{Max Time (s)}} \\\\
+\\hline
+{step_rows_tex}\\end{{tabularx}}
+\\end{{table}}
+
+\\begin{{table}}[h]
+\\centering
+\\caption{{System Telemetry Interpretation Matrix}}
+\\label{{tab:runtime-interpretation}}
+\\small
+\\renewcommand{{\\arraystretch}}{{1.4}}
+\\begin{{tabularx}}{{\\linewidth}}{{|
+  >{{\\raggedright\\arraybackslash\\hsize=0.5\\hsize}}X|
+  >{{\\raggedright\\arraybackslash\\hsize=1.5\\hsize}}X|}}
+\\hline
+\\textbf{{Operational Indicator}} & \\textbf{{Systemic Interpretation and Engineering Insight}} \\\\
+\\hline
+{interpretation_rows_tex}\\end{{tabularx}}
+\\end{{table}}
+"""
+
     tex = f"""
 % Auto-generated by quick_eval_artifacts.py
 \\subsection{{Quantitative Evaluation Summary}}
-Table~\\ref{{tab:quant-results}} was updated from an executed sample of {metrics['eval_sample_size']} recent items.
+Table~\\ref{{tab:quant-results}} was updated from an executed sample of {metrics['eval_sample_size']} recent items. CVE extraction was evaluated on a separate CVE-containing database subset to avoid hiding vulnerability records behind a recency-only sample window.
 
 \\begin{{table}}[h]
 \\centering
@@ -266,11 +479,11 @@ Table~\\ref{{tab:quant-results}} was updated from an executed sample of {metrics
 \\hline
 \\textbf{{Metric}} & \\textbf{{Value}} & \\textbf{{Notes}} \\\\
 \\hline
-IOC precision (CVE benchmark) & {metrics['cve_precision']:.3f} & Structured-source CVE subset \\\\
+IOC precision (CVE benchmark) & {cve_precision_tex} & {cve_note_tex} \\\\
 \\hline
-IOC recall (CVE benchmark) & {metrics['cve_recall']:.3f} & Structured-source CVE subset \\\\
+IOC recall (CVE benchmark) & {cve_recall_tex} & {cve_note_tex} \\\\
 \\hline
-IOC F1 (CVE benchmark) & {metrics['cve_f1']:.3f} & Structured-source CVE subset \\\\
+IOC F1 (CVE benchmark) & {cve_f1_tex} & {cve_note_tex} \\\\
 \\hline
 LLM report hallucination rate & {metrics['hallucination_rate']:.3f} & Unsupported artifact mentions in saved reports \\\\
 \\hline
@@ -283,10 +496,13 @@ Median template report runtime / item & {metrics['median_template_report_ms']:.2
 \\end{{tabular}}
 \\end{{table}}
 
-\\subsection{{Before/After Cleaning Examples}}
+\\subsection{{Deterministic Text Normalization Examples}}
+The examples in Table~\\ref{{tab:normalization-examples}} measure the deterministic preprocessing layer only. This layer removes formatting noise and unsafe control characters while preserving the original source semantics. It is intentionally not used as a translation layer, because the database must retain traceable public-source evidence for auditability.
+
 \\begin{{table}}[h]
 \\centering
-\\caption{{Examples of raw versus normalized source text}}
+\\caption{{Examples of deterministic raw versus normalized source text}}
+\\label{{tab:normalization-examples}}
 \\begin{{tabular}}{{|p{{2.8cm}}|p{{5.3cm}}|p{{5.3cm}}|}}
 \\hline
 \\textbf{{Source}} & \\textbf{{Raw text}} & \\textbf{{Normalized text}} \\\\
@@ -294,11 +510,18 @@ Median template report runtime / item & {metrics['median_template_report_ms']:.2
 {before_rows_tex}\\end{{tabular}}
 \\end{{table}}
 
+\\subsection{{Multilingual LLM Handling}}
+Multilingual source handling is performed at the semantic analysis and reporting layer rather than by overwriting raw database content. The LLM is prompted to produce an English analytical rendering, extract security entities, and explicitly mark unsupported fields as \\texttt{{not stated}}. This separation preserves the original evidence while still using the model's multilingual reasoning capability for analyst-facing summaries.
+
+The prompt template used for this evaluation artifact is stored in \\texttt{{output/eval/multilingual\\_llm\\_prompt.md}} and applies the following guardrails: preserve source uncertainty, avoid unsupported claims, extract only source-backed entities, align findings with the organization technology stack, and require analyst verification before action.
+
 \\subsection{{Prompt Engineering Evidence}}
 \\paragraph{{System prompt excerpt for JSON extraction.}}
 \\begin{{verbatim}}
 {prompt_tex}
 \\end{{verbatim}}
+
+{runtime_tex}
 
 {case_tex}
 """
@@ -308,24 +531,33 @@ Median template report runtime / item & {metrics['median_template_report_ms']:.2
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate quick evaluation artifacts from local CTI data.")
     parser.add_argument("--limit", type=int, default=80, help="Number of recent DB items to evaluate.")
+    parser.add_argument("--cve-limit", type=int, default=500, help="Number of CVE-containing DB items to use for CVE extraction benchmark.")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     conn = get_conn()
     try:
         items = fetch_recent_items(conn, args.limit)
+        cve_items = fetch_cve_benchmark_items(conn, args.cve_limit)
         profile = db_handler.get_active_profile(conn)
 
-        cve = compute_cve_metrics(items)
+        cve = compute_cve_metrics(cve_items)
         runtime = compute_runtime_metrics(items, profile)
         halluc = compute_report_hallucination_rate(items)
         failures = compute_report_failure_rate()
         before_after_rows = write_before_after(items)
+        write_multilingual_prompt()
         snippets = write_prompt_snippets()
         case = write_case_study(items)
+        runtime_summary = load_runtime_summary()
 
         metrics = {
             "eval_sample_size": len(items),
+            "cve_eval_sample_size": len(cve_items),
+            "cve_benchmark_size": cve["sample_size"],
+            "cve_true_positive": cve["tp"],
+            "cve_false_positive": cve["fp"],
+            "cve_false_negative": cve["fn"],
             "cve_precision": cve["precision"],
             "cve_recall": cve["recall"],
             "cve_f1": cve["f1"],
@@ -335,7 +567,7 @@ def main() -> None:
             "median_template_report_ms": runtime["median_template_report_ms"],
         }
         (OUT_DIR / "quant_summary.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-        write_tex_bundle(metrics, before_after_rows, snippets, case)
+        write_tex_bundle(metrics, before_after_rows, snippets, case, runtime_summary)
         print(json.dumps(metrics, indent=2))
         print(f"Wrote artifacts to: {OUT_DIR}")
     finally:

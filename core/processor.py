@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -72,6 +73,50 @@ def calculate_content_similarity(text1: str, text2: str) -> float:
         return 0.0
 
 
+def _token_overlap(text1: str, text2: str) -> int:
+    tokens1 = set(re.findall(r"[a-z0-9]{4,}", (text1 or "").lower()))
+    tokens2 = set(re.findall(r"[a-z0-9]{4,}", (text2 or "").lower()))
+    return len(tokens1 & tokens2)
+
+
+def _llm_duplicate_decision(text1: str, text2: str, cfg: Dict | None = None) -> bool:
+    try:
+        from analysis.ollama_client import generate_text
+
+        prompt = f"""
+Decide whether these two cyber threat intelligence items describe the same underlying event.
+Respond only as JSON: {{"duplicate": true}} or {{"duplicate": false}}.
+
+Item A:
+{text1[:900]}
+
+Item B:
+{text2[:900]}
+""".strip()
+        raw = generate_text(
+            prompt=prompt,
+            system="You are a conservative CTI de-duplication assistant. Mark duplicate only when the same event, CVE, campaign, or advisory is clearly described.",
+            temperature=0,
+            max_tokens=40,
+            cfg=cfg,
+            request_label="llm-dedup",
+            trigger_cooldown=False,
+            num_ctx_override=1536,
+            timeout_override=int((cfg or {}).get("pipeline", {}).get("llm_dedup_timeout_seconds", 20)),
+            max_retries_override=1,
+        )
+        cleaned = raw.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        payload = json.loads(cleaned.strip())
+        return bool(payload.get("duplicate"))
+    except Exception as exc:
+        logger.debug("LLM-assisted dedup comparison skipped: %s", exc)
+        return False
+
+
 def _fast_hash_duplicate_check(text: str) -> str:
     return hashlib.sha256(text[:500].encode()).hexdigest()
 
@@ -81,6 +126,7 @@ def deduplicate_items(
     similarity_threshold: float = 0.85,
     enable_semantic: bool = True,
     window_size: int = 100,
+    cfg: Dict | None = None,
 ) -> Tuple[List[Dict], int]:
     if not items:
         return [], 0
@@ -108,6 +154,39 @@ def deduplicate_items(
             hash_duplicates += 1
 
     total_duplicates = url_duplicates + hash_duplicates
+    pipeline_cfg = (cfg or {}).get("pipeline", {})
+    enable_llm_dedup = bool(pipeline_cfg.get("enable_llm_dedup", False))
+    max_llm_pairs = max(0, int(pipeline_cfg.get("llm_dedup_max_pairs", 25)))
+    llm_pairs_used = 0
+
+    if enable_llm_dedup and len(unique_by_hash) > 1:
+        final_items = []
+        llm_duplicates = 0
+        for item_a in unique_by_hash:
+            if _is_structured_source(item_a.get("source", "")):
+                final_items.append(item_a)
+                continue
+            text_a = f"{item_a.get('title', '')} {item_a.get('content', '')[:700]}"
+            duplicate = False
+            for item_b in final_items[max(0, len(final_items) - window_size):]:
+                if llm_pairs_used >= max_llm_pairs:
+                    break
+                text_b = f"{item_b.get('title', '')} {item_b.get('content', '')[:700]}"
+                cves_a = set(re.findall(r"\bCVE-\d{4}-\d+\b", text_a, re.IGNORECASE))
+                cves_b = set(re.findall(r"\bCVE-\d{4}-\d+\b", text_b, re.IGNORECASE))
+                if not (cves_a & cves_b) and _token_overlap(text_a, text_b) < 5:
+                    continue
+                llm_pairs_used += 1
+                if _llm_duplicate_decision(text_a, text_b, cfg):
+                    duplicate = True
+                    llm_duplicates += 1
+                    break
+            if not duplicate:
+                final_items.append(item_a)
+        logger.info("LLM-assisted dedup compared %s pairs and removed %s duplicates.", llm_pairs_used, llm_duplicates)
+        total_duplicates += llm_duplicates
+        unique_by_hash = final_items
+
     if not enable_semantic or len(unique_by_hash) <= 1:
         return unique_by_hash, total_duplicates
 
@@ -230,6 +309,7 @@ def process_collected_items(items: List[Dict], cfg: Dict) -> List[Dict]:
         similarity_threshold=dedup_threshold,
         enable_semantic=enable_semantic,
         window_size=window_size,
+        cfg=cfg,
     )
 
     org_profile = cfg.get("org_profile", {"preferred_languages": ["en"]})

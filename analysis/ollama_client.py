@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Any, Dict
 
 import requests
+from dotenv import load_dotenv
 from utils.monitor import get_effective_available_ram_gb
 
 logger = logging.getLogger("ollama_client")
+load_dotenv()
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:3b-instruct-q4_K_M"
@@ -24,12 +27,74 @@ def _llm_cfg(cfg: Dict | None) -> Dict[str, Any]:
     return (cfg or {}).get("llm", {})
 
 
+def get_runtime(cfg: Dict | None = None) -> str:
+    return str(_llm_cfg(cfg).get("runtime", "ollama")).strip().lower()
+
+
 def get_base_url(cfg: Dict | None = None) -> str:
     return str(_llm_cfg(cfg).get("base_url", DEFAULT_BASE_URL)).rstrip("/")
 
 
 def get_model_name(cfg: Dict | None = None) -> str:
     return str(_llm_cfg(cfg).get("model", DEFAULT_MODEL))
+
+
+def _api_base_url(cfg: Dict | None = None) -> str:
+    llm_cfg = _llm_cfg(cfg)
+    runtime = get_runtime(cfg)
+    default_urls = {
+        "deepseek": "https://api.deepseek.com",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "groq": "https://api.groq.com/openai/v1",
+        "openai_compatible": "https://api.deepseek.com",
+    }
+    return str(llm_cfg.get("api_base_url") or llm_cfg.get("base_url") or default_urls.get(runtime, DEFAULT_BASE_URL)).rstrip("/")
+
+
+def _api_key(cfg: Dict | None = None) -> str:
+    llm_cfg = _llm_cfg(cfg)
+    if llm_cfg.get("api_key"):
+        return str(llm_cfg["api_key"])
+    env_name = str(llm_cfg.get("api_key_env") or "").strip()
+    if env_name:
+        return os.getenv(env_name, "")
+    runtime = get_runtime(cfg)
+    default_env = {
+        "deepseek": "DEEPSEEK_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
+    }.get(runtime, "")
+    return os.getenv(default_env, "") if default_env else ""
+
+
+def _chat_completions_url(cfg: Dict | None = None) -> str:
+    base_url = _api_base_url(cfg)
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def _openai_compatible_headers(cfg: Dict | None = None) -> dict[str, str]:
+    api_key = _api_key(cfg)
+    if not api_key:
+        raise OllamaServiceError(
+            "External LLM API key is missing. Configure llm.api_key_env in config.yaml "
+            "and set that environment variable in .env or your shell."
+        )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    llm_cfg = _llm_cfg(cfg)
+    if llm_cfg.get("http_referer"):
+        headers["HTTP-Referer"] = str(llm_cfg["http_referer"])
+    if llm_cfg.get("app_title"):
+        headers["X-Title"] = str(llm_cfg["app_title"])
+    for key, value in (llm_cfg.get("extra_headers") or {}).items():
+        if value is not None:
+            headers[str(key)] = str(value)
+    return headers
 
 
 def get_model_candidates(cfg: Dict | None = None) -> list[str]:
@@ -188,6 +253,11 @@ def _format_runtime_hint(message: str) -> str:
 
 def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
     global _selected_model
+    runtime = get_runtime(cfg)
+    if runtime in {"deepseek", "openrouter", "groq", "openai_compatible"}:
+        _probe_external_service(cfg, timeout=timeout)
+        return
+
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
     tags_timeout = min(timeout, _probe_timeout_seconds(cfg))
@@ -261,6 +331,44 @@ def probe_service(cfg: Dict | None = None, timeout: int = 3) -> None:
     raise OllamaServiceError(f"Ollama probe could not load any configured model. {last_error}")
 
 
+def _probe_external_service(cfg: Dict | None = None, timeout: int = 3) -> None:
+    global _selected_model
+    model_name = get_model_name(cfg)
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "You are a concise health-check assistant."},
+            {"role": "user", "content": "Reply with pong only."},
+        ],
+        "temperature": 0,
+        "max_tokens": 8,
+    }
+    request_timeout = max(timeout, min(_probe_timeout_seconds(cfg), 30))
+    try:
+        response = requests.post(
+            _chat_completions_url(cfg),
+            json=payload,
+            headers=_openai_compatible_headers(cfg),
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        if not str(content).strip():
+            raise OllamaServiceError("External LLM probe returned an empty response.")
+        _selected_model = model_name
+        logger.info("External LLM probe succeeded. runtime=%s model=%s", get_runtime(cfg), model_name)
+    except requests.exceptions.HTTPError as exc:
+        detail = _extract_error_message(exc)
+        raise OllamaServiceError(f"External LLM HTTP failure during probe: {detail}") from exc
+    except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+        raise OllamaServiceError(f"External LLM probe failed: {exc}") from exc
+
+
 def generate_text(
     prompt: str,
     *,
@@ -274,6 +382,19 @@ def generate_text(
     timeout_override: int | None = None,
     max_retries_override: int | None = None,
 ) -> str:
+    runtime = get_runtime(cfg)
+    if runtime in {"deepseek", "openrouter", "groq", "openai_compatible"}:
+        return _generate_text_openai_compatible(
+            prompt=prompt,
+            system=system,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            cfg=cfg,
+            request_label=request_label,
+            timeout_override=timeout_override,
+            max_retries_override=max_retries_override,
+        )
+
     _ensure_available(cfg)
     base_url = get_base_url(cfg)
     headers = {"Content-Type": "application/json"}
@@ -357,3 +478,84 @@ def generate_text(
             raise OllamaServiceError(f"Ollama invalid JSON during {request_label}") from exc
 
     raise OllamaServiceError(f"Ollama failed during {request_label}")
+
+
+def _generate_text_openai_compatible(
+    *,
+    prompt: str,
+    system: str = "",
+    temperature: float = 0.1,
+    max_tokens: int = 1024,
+    cfg: Dict | None = None,
+    request_label: str = "request",
+    timeout_override: int | None = None,
+    max_retries_override: int | None = None,
+) -> str:
+    headers = _openai_compatible_headers(cfg)
+    timeout = max(5, int(timeout_override)) if timeout_override is not None else _label_timeout(cfg, request_label, _request_timeout(cfg))
+    if max_retries_override is not None:
+        try:
+            max_retries = max(1, min(int(max_retries_override), 4))
+        except (TypeError, ValueError):
+            max_retries = _max_retries(cfg)
+    else:
+        max_retries = _max_retries(cfg)
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload = {
+        "model": get_model_name(cfg),
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(_chat_completions_url(cfg), json=payload, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            text = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            if not str(text).strip():
+                raise OllamaServiceError(f"Empty external LLM response for {request_label}")
+            return str(text)
+        except requests.exceptions.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else "unknown"
+            detail = _extract_error_message(exc)
+            if status_code in {429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                wait_time = min(8, 2 ** attempt)
+                logger.warning(
+                    "External LLM HTTP %s on %s attempt %s/%s. Retrying in %ss. detail=%s",
+                    status_code,
+                    request_label,
+                    attempt + 1,
+                    max_retries,
+                    wait_time,
+                    detail,
+                )
+                time.sleep(wait_time)
+                continue
+            raise OllamaServiceError(f"External LLM HTTP {status_code} during {request_label}: {detail}") from exc
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            if attempt < max_retries - 1:
+                wait_time = min(8, 2 ** attempt)
+                logger.warning(
+                    "External LLM transport error on %s attempt %s/%s. Retrying in %ss.",
+                    request_label,
+                    attempt + 1,
+                    max_retries,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+                continue
+            raise OllamaServiceError(f"External LLM transport failure during {request_label}") from exc
+        except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+            raise OllamaServiceError(f"External LLM request failure during {request_label}: {exc}") from exc
+
+    raise OllamaServiceError(f"External LLM failed during {request_label}")

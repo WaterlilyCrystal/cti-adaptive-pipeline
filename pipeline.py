@@ -22,6 +22,7 @@ from core.rss_collector import fetch_rss_from_config
 from core.telegram_collector import fetch_telegram_data
 from utils.monitor import apply_runtime_profile
 from utils import db_handler
+from utils.benchmarking import timed_step, write_timing_summary
 from utils.db_handler import init_db, save_items_batch, upsert_items_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -63,8 +64,9 @@ def sync_profile_from_config(cfg: dict, conn) -> None:
 def phase_collect(cfg: dict, tiers: set[str] | None = None):
     timestamp = datetime.now(timezone.utc).isoformat()
     logging.info("[%s] === PHASE 1: COLLECTION ===", timestamp)
-    db_conn = init_db(cfg)
-    sync_profile_from_config(cfg, db_conn)
+    with timed_step("phase_1_collect", "init_db_and_profile"):
+        db_conn = init_db(cfg)
+        sync_profile_from_config(cfg, db_conn)
 
     tiers = tiers or {"social", "news", "vuln"}
     all_collected_items = []
@@ -72,14 +74,15 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
 
     if "social" in tiers:
         for collector_name, collector in [
-            ("Reddit", lambda: fetch_reddit_rss_feed(days_window=12 / 24)),
-            ("Telegram", lambda: fetch_telegram_data(days_window=12 / 24)),
-            ("Bluesky", lambda: fetch_bluesky_infosec(limit=200, days_back=1, keyword="ransomware OR malware OR exploit")),
-            ("Mastodon", lambda: fetch_mastodon_fosstodon(limit=200, days_back=1, hashtag="cybersecurity")),
-            ("AlienVault OTX", lambda: fetch_otx_pulses(limit=250, days_back=1)),
+            ("Reddit", lambda: fetch_reddit_rss_feed(days_window=7)),
+            ("Telegram", lambda: fetch_telegram_data(days_window=7)),
+            ("Bluesky", lambda: fetch_bluesky_infosec(limit=200, days_back=10, keyword="ransomware OR malware OR exploit")),
+            ("Mastodon", lambda: fetch_mastodon_fosstodon(limit=1000, days_back=7, hashtag="cybersecurity")),
+            ("AlienVault OTX", lambda: fetch_otx_pulses(limit=500, days_back=7)),
         ]:
             try:
-                items = collector()
+                with timed_step("phase_1_collect", f"collector_{collector_name.lower().replace(' ', '_')}", {"tier": "social"}):
+                    items = collector()
                 logging.info("%s collection returned: %s items", collector_name, len(items))
                 all_collected_items.extend(items)
             except Exception as exc:
@@ -87,7 +90,8 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
 
     if "news" in tiers:
         try:
-            rss_items = fetch_rss_from_config(cfg, days_window=6 / 24)
+            with timed_step("phase_1_collect", "collector_rss", {"tier": "news"}):
+                rss_items = fetch_rss_from_config(cfg, days_window=6 / 24)
             logging.info("RSS collection returned: %s items", len(rss_items))
             all_collected_items.extend(rss_items)
         except Exception as exc:
@@ -95,7 +99,8 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
 
     if "vuln" in tiers:
         try:
-            cve_items = fetch_cve_data(days_window=1, db_conn=db_conn)
+            with timed_step("phase_1_collect", "collector_cve_kev", {"tier": "vuln"}):
+                cve_items = fetch_cve_data(days_window=1, db_conn=db_conn)
             logging.info("Vulnerability sync returned: %s items", len(cve_items))
             vuln_collected_items.extend(cve_items)
         except Exception as exc:
@@ -104,8 +109,13 @@ def phase_collect(cfg: dict, tiers: set[str] | None = None):
     total_collected = len(all_collected_items) + len(vuln_collected_items)
     logging.info("Total raw items collected: %s", total_collected)
     if all_collected_items or vuln_collected_items:
-        inserted = save_items_batch(db_conn, all_collected_items)
-        upserted = upsert_items_batch(db_conn, vuln_collected_items)
+        with timed_step(
+            "phase_1_collect",
+            "db_persist_collected_items",
+            {"social_news_items": len(all_collected_items), "vuln_items": len(vuln_collected_items)},
+        ):
+            inserted = save_items_batch(db_conn, all_collected_items)
+            upserted = upsert_items_batch(db_conn, vuln_collected_items)
         logging.info(
             "Phase 1 complete. Saved %s new social/news records and inserted/updated %s vulnerability records.",
             inserted,
@@ -129,7 +139,8 @@ def phase_process(cfg: dict):
     logging.info("[%s] === PHASE 2: PROCESSING ===", timestamp)
     db_conn = init_db(cfg)
     try:
-        processed_count = run_processing(db_conn, cfg, batch_size=cfg.get("pipeline", {}).get("batch_processing_size", 500))
+        with timed_step("phase_2_process", "run_processing"):
+            processed_count = run_processing(db_conn, cfg, batch_size=cfg.get("pipeline", {}).get("batch_processing_size", 500))
         logging.info("Phase 2 complete. Processed %s items.", processed_count)
     finally:
         db_conn.close()
@@ -143,20 +154,26 @@ def phase_analyze(cfg: dict):
     max_failures = max(1, int(cfg.get("pipeline", {}).get("phase3_stop_after_consecutive_llm_failures", 1)))
     try:
         try:
-            probe_service(cfg)
+            with timed_step("phase_3_4_analyze_report", "llm_probe"):
+                probe_service(cfg)
         except OllamaServiceError as exc:
-            logging.error("Phase 3 skipped because Ollama is unavailable: %s", exc)
+            logging.error("Phase 3 skipped because the configured LLM runtime is unavailable: %s", exc)
             return
         pipeline_cfg = cfg.get("pipeline", {})
         max_items_per_run = max(1, int(pipeline_cfg.get("phase3_max_items", 20)))
         recent_days = max(1, int(pipeline_cfg.get("phase3_recent_days", 30)))
         relevant_only = bool(pipeline_cfg.get("phase3_relevant_only", True))
-        items_to_process = db_handler.get_analysis_candidates(
-            db_conn,
-            limit=max_items_per_run,
-            recent_days=recent_days,
-            relevant_only=relevant_only,
-        )
+        with timed_step(
+            "phase_3_4_analyze_report",
+            "select_analysis_candidates",
+            {"limit": max_items_per_run, "recent_days": recent_days, "relevant_only": relevant_only},
+        ):
+            items_to_process = db_handler.get_analysis_candidates(
+                db_conn,
+                limit=max_items_per_run,
+                recent_days=recent_days,
+                relevant_only=relevant_only,
+            )
         if not items_to_process:
             logging.info(
                 "No deterministic analysis candidates found. relevant_only=%s recent_days=%s max_items=%s",
@@ -172,12 +189,13 @@ def phase_analyze(cfg: dict):
         )
         for item in items_to_process:
             try:
-                run_analysis.process_single_item(item, cfg=cfg, db_conn=db_conn, is_mock=False)
+                with timed_step("phase_3_4_analyze_report", "process_single_item", {"item_id": item.get("id")}):
+                    run_analysis.process_single_item(item, cfg=cfg, db_conn=db_conn, is_mock=False)
                 consecutive_llm_failures = 0
             except OllamaServiceError as exc:
                 consecutive_llm_failures += 1
                 logging.error(
-                    "Ollama unavailable for item_id=%s title=%r: %s",
+                    "Configured LLM runtime unavailable for item_id=%s title=%r: %s",
                     item.get("id"),
                     item.get("title", "")[:160],
                     exc,
@@ -201,9 +219,13 @@ def phase_analyze(cfg: dict):
 
 
 def run_full(cfg: dict):
-    phase_collect(cfg)
-    phase_process(cfg)
-    phase_analyze(cfg)
+    with timed_step("pipeline", "phase_collect_total"):
+        phase_collect(cfg)
+    with timed_step("pipeline", "phase_process_total"):
+        phase_process(cfg)
+    with timed_step("pipeline", "phase_analyze_report_total"):
+        phase_analyze(cfg)
+    write_timing_summary()
     logging.info("[%s] === PIPELINE RUN COMPLETED ===", datetime.now(timezone.utc).isoformat())
 
 
@@ -221,10 +243,16 @@ if __name__ == "__main__":
     cfg = load_config()
     if args.phase == "collect":
         selected_tiers = {"social", "news", "vuln"} if args.tier == "all" else {args.tier}
-        phase_collect(cfg, tiers=selected_tiers)
+        with timed_step("pipeline", "phase_collect_total"):
+            phase_collect(cfg, tiers=selected_tiers)
+        write_timing_summary()
     elif args.phase == "process":
-        phase_process(cfg)
+        with timed_step("pipeline", "phase_process_total"):
+            phase_process(cfg)
+        write_timing_summary()
     elif args.phase == "analyze":
-        phase_analyze(cfg)
+        with timed_step("pipeline", "phase_analyze_report_total"):
+            phase_analyze(cfg)
+        write_timing_summary()
     else:
         run_full(cfg)
